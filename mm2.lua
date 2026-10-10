@@ -46,12 +46,24 @@ local TEXT        = Color3.fromRGB(255, 255, 255)
 local TEXT_DIM    = Color3.fromRGB(170, 170, 178)
 local TEXT_ON     = THEMES.RED.accent
 
--- Track themed elements for live recolor
 local ThemedElements = { windows = {}, toggles = {}, buttons = {}, dropdowns = {}, sections = {} }
 
 -- ============================================================
--- ROOT
+-- ROOT  (above everything, including CoreGui)
 -- ============================================================
+local guiParent
+pcall(function()
+    if gethui then guiParent = gethui() end
+end)
+if not guiParent then
+    pcall(function()
+        guiParent = game:GetService("CoreGui")
+    end)
+end
+if not guiParent then
+    guiParent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "BlackoutTripleGUI"
 ScreenGui.ResetOnSpawn = false
@@ -59,10 +71,10 @@ ScreenGui.IgnoreGuiInset = true
 ScreenGui.DisplayOrder = 2147483647
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Enabled = false
-ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+ScreenGui.Parent = guiParent
 
 -- ============================================================
--- LOADING SPLASH SCREEN
+-- LOADING SPLASH SCREEN  (same top-tier parent)
 -- ============================================================
 local LoadGui = Instance.new("ScreenGui")
 LoadGui.Name = "BlackoutLoader"
@@ -70,7 +82,7 @@ LoadGui.ResetOnSpawn = false
 LoadGui.IgnoreGuiInset = true
 LoadGui.DisplayOrder = 2147483647
 LoadGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-LoadGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+LoadGui.Parent = guiParent
 
 local LoadBG = Instance.new("Frame")
 LoadBG.Size = UDim2.new(1, 0, 1, 0)
@@ -1587,7 +1599,6 @@ ThemePanel.CreateDropdown("THEME COLOR", "RED",
     ApplyTheme(v)
 end)
 
--- Apply RED once everything exists so all elements are properly synced.
 ApplyTheme("RED")
 
 -- ============================================================
@@ -1596,7 +1607,7 @@ ApplyTheme("RED")
 ScreenGui.Enabled = true
 
 -- ============================================================
--- KEYBINDS — RightShift instantly toggles GUI
+-- KEYBINDS
 -- ============================================================
 UserInputService.InputBegan:Connect(function(input, gpe)
     if gpe then return end
