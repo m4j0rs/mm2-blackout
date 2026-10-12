@@ -96,6 +96,7 @@ local aimbotSmoothing = 0.2
 local aimbotFOV = 150
 local aimbotPart = "Head"
 local aimbotKey = "Right Click"
+local aimbotTarget = "Murderer"  -- "All" or "Murderer"
 local aiming = false
 
 local killAuraEnabled = false
@@ -1497,6 +1498,12 @@ local function getClosestPlayerInFOV()
         if plr ~= LocalPlayer and plr.Character then
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
             if hum and hum.Health > 0 then
+                -- Target filter
+                if aimbotTarget == "Murderer" then
+                    local hasKnife = plr.Character:FindFirstChild("Knife") or
+                        (plr.Backpack and plr.Backpack:FindFirstChild("Knife"))
+                    if not hasKnife then continue end
+                end
                 local part = plr.Character:FindFirstChild(aimbotPart)
                     or plr.Character:FindFirstChild("HumanoidRootPart")
                 if part then
@@ -2338,6 +2345,10 @@ end)
 CombatPanel.CreateDropdown("AIM PART", "Head",
     {"Head", "UpperTorso", "HumanoidRootPart"}, function(v)
     aimbotPart = v
+end)
+CombatPanel.CreateDropdown("AIM TARGET", "Murderer",
+    {"All", "Murderer"}, function(v)
+    aimbotTarget = v
 end)
 CombatPanel.CreateDropdown("AIM SMOOTHING", 0.2,
     {0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1}, function(v)
