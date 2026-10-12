@@ -114,6 +114,12 @@ local coinFarmConnection = nil
 local coinFarmSpeed = 1
 local coinFarmWarmup = 0.25
 
+-- Silent Aim loop handle
+local silentAimLoop = nil
+-- Forward references so toggles can control each other
+local silentAimToggleRef = nil
+local triggerbotToggleRef = nil
+
 -- ============================================================
 -- ROOT
 -- ============================================================
@@ -592,8 +598,19 @@ local function CreateWindow(title, posX, posY)
             end
         end)
 
+        local function SetState(newState, fireCallback)
+            if state == newState then return end
+            state = newState
+            Render(true)
+            if fireCallback and callback then
+                local ok, err = pcall(callback, state)
+                if not ok then warn("[Blackout] " .. tostring(err)) end
+            end
+        end
+
         Btn.MouseButton1Click:Connect(function()
-            state = not state
+            local newState = not state
+            state = newState
             Render(true)
             if callback then
                 local ok, err = pcall(callback, state)
@@ -606,7 +623,12 @@ local function CreateWindow(title, posX, posY)
             render = function() Render(false) end,
         })
 
-        return Btn
+        return {
+            Button = Btn,
+            SetState = function(v) SetState(v, true) end,
+            SetStateSilent = function(v) SetState(v, false) end,
+            GetState = function() return state end,
+        }
     end
 
     local function CreateButton(name, callback)
@@ -2186,6 +2208,28 @@ local function StopInvisible()
 end
 
 -- ============================================================
+-- SILENT AIM LOOP CONTROL
+-- ============================================================
+local function StartSilentAimLoop()
+    if silentAimLoop then task.cancel(silentAimLoop) end
+    silentAimLoop = task.spawn(function()
+        while getgenv().SilentAimActive do
+            pcall(FireSilentAim)
+            task.wait(0.15)  -- fire rate; lower = faster
+        end
+        silentAimLoop = nil
+    end)
+end
+
+local function StopSilentAimLoop()
+    getgenv().SilentAimActive = false
+    if silentAimLoop then
+        task.cancel(silentAimLoop)
+        silentAimLoop = nil
+    end
+end
+
+-- ============================================================
 -- RUN LOADER, THEN BUILD PANELS
 -- ============================================================
 RunLoadingSequence()
@@ -2290,12 +2334,40 @@ CombatPanel.CreateSection("combat")
 CombatPanel.CreateToggle("Auto Grab Gun", false, function(s)
     if s then StartAutoGrab() else StopAutoGrab() end
 end)
-CombatPanel.CreateToggle("Triggerbot", false, function(s)
-    if s then StartTriggerbot() else StopTriggerbot() end
+
+-- Triggerbot toggle (mutually exclusive with Silent Aim)
+triggerbotToggleRef = CombatPanel.CreateToggle("Triggerbot", false, function(s)
+    if s then
+        -- turn off silent aim first
+        if getgenv().SilentAimActive then
+            if silentAimToggleRef then
+                silentAimToggleRef.SetStateSilent(false)
+            end
+            StopSilentAimLoop()
+        end
+        StartTriggerbot()
+    else
+        StopTriggerbot()
+    end
 end)
-CombatPanel.CreateToggle("Silent Aim [E]", false, function(s)
-    getgenv().SilentAimActive = s
+
+-- Silent Aim toggle (mutually exclusive with Triggerbot)
+silentAimToggleRef = CombatPanel.CreateToggle("Silent Aim", false, function(s)
+    if s then
+        -- turn off triggerbot first
+        if getgenv().TriggerbotActive then
+            if triggerbotToggleRef then
+                triggerbotToggleRef.SetStateSilent(false)
+            end
+            StopTriggerbot()
+        end
+        getgenv().SilentAimActive = true
+        StartSilentAimLoop()
+    else
+        StopSilentAimLoop()
+    end
 end)
+
 CombatPanel.CreateToggle("Kill Aura", false, function(s)
     killAuraEnabled = s
     if s then startKillAura() else stopKillAura() end
@@ -2453,8 +2525,6 @@ UserInputService.InputBegan:Connect(function(input, gpe)
     if gpe then return end
     if input.KeyCode == Enum.KeyCode.RightShift then
         ScreenGui.Enabled = not ScreenGui.Enabled
-    elseif input.KeyCode == Enum.KeyCode.E and getgenv().SilentAimActive then
-        FireSilentAim()
     elseif input.KeyCode == getgenv().CoinKeybind and getgenv().CoinKeybindActive then
         CollectCoins()
     elseif isAimInput(input) and aimbotEnabled then
@@ -2468,4 +2538,4 @@ UserInputService.InputEnded:Connect(function(input)
     end
 end)
 
-print("[Blackout] Loaded. RightShift = toggle all | E = Silent Aim | C = Coin Collect | Aim Key = configurable")
+print("[Blackout] Loaded. RightShift = toggle all | C = Coin Collect | Aim Key = configurable")
