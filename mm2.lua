@@ -1638,69 +1638,135 @@ local function StopFastThrow()
 end
 
 -- ============================================================
--- FLING
+-- FLING — WeAreDevs spin fling + TP on top + return
 -- ============================================================
-local function FlingPlayer(targetPlayer)
-    local targetChar = targetPlayer.Character
-    if not targetChar then return end
-    local targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
-    if not targetHRP then return end
+local flingActive = false
+local flingTarget = nil
+local flingBV = nil
+local flingConn = nil
+local flingOrigCF = nil
+local flingOriginalCanCollide = {}
 
-    for _, v in ipairs(targetChar:GetChildren()) do
-        if v.Name == "BlackoutFling" then v:Destroy() end
+local function CleanupFling()
+    if flingBV then
+        pcall(function() flingBV:Destroy() end)
+        flingBV = nil
     end
-
-    pcall(function() targetHRP:SetNetworkOwner(LocalPlayer) end)
-    task.wait(0.05)
-
-    local randomDir = Vector3.new(
-        math.random(-1, 1),
-        math.random(1, 2),
-        math.random(-1, 1)
-    ).Unit
-
-    local bp = Instance.new("BodyPosition")
-    bp.Name = "BlackoutFling"
-    bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-    bp.P = 50000
-    bp.D = 500
-    bp.Position = targetHRP.Position + randomDir * 5000
-    bp.Parent = targetHRP
-
-    local bg = Instance.new("BodyGyro")
-    bg.Name = "BlackoutFling"
-    bg.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-    bg.P = 50000
-    bg.D = 500
-    bg.CFrame = CFrame.Angles(math.random() * 6.28, math.random() * 6.28, math.random() * 6.28)
-    bg.Parent = targetHRP
-
-    activeFlingTarget = targetPlayer
+    if flingConn then
+        pcall(function() flingConn:Disconnect() end)
+        flingConn = nil
+    end
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            pcall(function() hum.PlatformStand = false end)
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+        end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp and hrp.Parent then
+            pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+            end)
+            if flingOrigCF then
+                hrp.CFrame = flingOrigCF
+            end
+        end
+        for part, val in pairs(flingOriginalCanCollide) do
+            if part and part.Parent then
+                pcall(function() part.CanCollide = val end)
+            end
+        end
+        flingOriginalCanCollide = {}
+    end
+    flingActive = false
+    flingTarget = nil
+    flingOrigCF = nil
 end
 
 local function StopFling()
-    if activeFlingTarget and activeFlingTarget.Character then
-        for _, v in ipairs(activeFlingTarget.Character:GetChildren()) do
-            if v.Name == "BlackoutFling" then
-                v:Destroy()
-            end
+    CleanupFling()
+end
+
+local function FlingPlayer(targetPlayer)
+    if flingActive then
+        CleanupFling()
+        task.wait(0.05)
+    end
+    if not targetPlayer or not targetPlayer.Character then return end
+    local targetHRP = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not targetHRP then return end
+
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return end
+
+    flingActive = true
+    flingTarget = targetPlayer
+    flingOrigCF = hrp.CFrame
+
+    flingOriginalCanCollide = {}
+    for _, v in ipairs(char:GetChildren()) do
+        if v:IsA("BasePart") then
+            flingOriginalCanCollide[v] = v.CanCollide
+            v.CanCollide = false
+            v.Massless = true
+            v.Velocity = Vector3.zero
         end
     end
-    activeFlingTarget = nil
+
+    pcall(function() hum.PlatformStand = true end)
+
+    hrp.CFrame = targetHRP.CFrame + Vector3.new(0, 3, 0)
+
+    local bv = Instance.new("BodyAngularVelocity")
+    bv.Name = "FlingBV"
+    bv.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    bv.P = math.huge
+    bv.AngularVelocity = Vector3.new(0, 9e5, 0)
+    bv.Parent = hrp
+    flingBV = bv
+
+    flingConn = RunService.Stepped:Connect(function()
+        if not flingActive then return end
+        for _, v in ipairs(char:GetChildren()) do
+            if v:IsA("BasePart") then
+                v.CanCollide = false
+            end
+        end
+    end)
+
+    task.spawn(function()
+        local t0 = tick()
+        while flingActive and tick() - t0 < 2.5 do
+            if flingTarget and flingTarget.Character then
+                local tHRP = flingTarget.Character:FindFirstChild("HumanoidRootPart")
+                if tHRP and hrp and hrp.Parent then
+                    hrp.CFrame = tHRP.CFrame + Vector3.new(0, 3, 0)
+                    hrp.AssemblyLinearVelocity = Vector3.zero
+                end
+            end
+            RunService.Heartbeat:Wait()
+        end
+        CleanupFling()
+    end)
 end
 
 local function FlingByName(name)
     if not name or name == "" then return end
-    local found = nil
+    local lower = name:lower()
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and (plr.Name:lower():find(name:lower()) or (plr.DisplayName and plr.DisplayName:lower():find(name:lower()))) then
-            found = plr
-            break
+        if plr ~= LocalPlayer then
+            if plr.Name:lower():find(lower, 1, true) or (plr.DisplayName or ""):lower():find(lower, 1, true) then
+                FlingPlayer(plr)
+                return
+            end
         end
     end
-    if found then
-        FlingPlayer(found)
-    end
+    warn("[Fling] No player found: " .. name)
 end
 
 local function FlingMurderer()
@@ -1714,6 +1780,7 @@ local function FlingMurderer()
             end
         end
     end
+    warn("[Fling] No murderer in round")
 end
 
 local function FlingSheriff()
@@ -1727,6 +1794,7 @@ local function FlingSheriff()
             end
         end
     end
+    warn("[Fling] No sheriff in round")
 end
 
 -- ============================================================
@@ -2215,7 +2283,7 @@ local function StartSilentAimLoop()
     silentAimLoop = task.spawn(function()
         while getgenv().SilentAimActive do
             pcall(FireSilentAim)
-            task.wait(0.15)  -- fire rate; lower = faster
+            task.wait(0.15)
         end
         silentAimLoop = nil
     end)
@@ -2335,10 +2403,8 @@ CombatPanel.CreateToggle("Auto Grab Gun", false, function(s)
     if s then StartAutoGrab() else StopAutoGrab() end
 end)
 
--- Triggerbot toggle (mutually exclusive with Silent Aim)
 triggerbotToggleRef = CombatPanel.CreateToggle("Triggerbot", false, function(s)
     if s then
-        -- turn off silent aim first
         if getgenv().SilentAimActive then
             if silentAimToggleRef then
                 silentAimToggleRef.SetStateSilent(false)
@@ -2351,10 +2417,8 @@ triggerbotToggleRef = CombatPanel.CreateToggle("Triggerbot", false, function(s)
     end
 end)
 
--- Silent Aim toggle (mutually exclusive with Triggerbot)
 silentAimToggleRef = CombatPanel.CreateToggle("Silent Aim", false, function(s)
     if s then
-        -- turn off triggerbot first
         if getgenv().TriggerbotActive then
             if triggerbotToggleRef then
                 triggerbotToggleRef.SetStateSilent(false)
@@ -2432,7 +2496,7 @@ CombatPanel.CreateDropdown("AIM FOV", 150,
 end)
 
 -- ============================================================
--- PANEL 4 — FARMING (before Theme)
+-- PANEL 4 — FARMING
 -- ============================================================
 local FarmPanel = CreateWindow("BLACKOUT // FARMING", 740, 20)
 
@@ -2483,7 +2547,7 @@ FarmPanel.CreateButton("Teleport to Map", function()
 end)
 
 -- ============================================================
--- PANEL 5 — THEME (behind Farming)
+-- PANEL 5 — THEME
 -- ============================================================
 local ThemePanel = CreateWindow("BLACKOUT // THEME", 980, 20)
 
