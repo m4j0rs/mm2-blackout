@@ -2,7 +2,7 @@ wait(2)
 if game.PlaceId ~= 142823291 then return end
 
 -- ============================================================
--- BLACKOUT GUI v2 | RED EDITION | TRIPLE PANEL + INTRO + THEME
+-- BLACKOUT GUI v2 | RED EDITION
 -- ============================================================
 
 local Players            = game:GetService("Players")
@@ -20,7 +20,7 @@ local DataChangedEvent   = Remotes:WaitForChild("PlayerDataChanged")
 local RoundEndEvent      = Remotes:WaitForChild("RoundEndFade")
 
 -- ============================================================
--- THEME TABLE (RED default)
+-- THEME
 -- ============================================================
 local THEMES = {
     RED    = { accent = Color3.fromRGB(230, 30, 45),   dim = Color3.fromRGB(120, 15, 22),   border = Color3.fromRGB(34, 20, 22) },
@@ -33,9 +33,6 @@ local THEMES = {
 }
 local currentTheme = "RED"
 
--- ============================================================
--- COLORS (mutable — ApplyTheme updates these)
--- ============================================================
 local BG          = Color3.fromRGB(6, 6, 7)
 local BG_ITEM     = Color3.fromRGB(13, 13, 15)
 local BG_HOVER    = Color3.fromRGB(22, 14, 16)
@@ -57,15 +54,49 @@ local RoleColors = {
     Innocent = Color3.fromRGB(65, 220, 125),
 }
 
-local function GetRoleColor(player)
+-- ============================================================
+-- ROLE DATA HELPER
+-- ============================================================
+local function GetRoleFromData(plr)
     local roles = getgenv().BlackoutRoles or {}
     for id, data in pairs(roles) do
-        if data and typeof(data) == "table" then
-            if tostring(id) == tostring(player.UserId) or id == player.Name then
-                return RoleColors[data.Role] or RoleColors.Innocent
+        local matches =
+            (tostring(id) == tostring(plr.UserId)) or
+            (id == plr.Name) or
+            (id == plr.DisplayName)
+        if matches then
+            if typeof(data) == "table" then
+                return data.Role
+            elseif typeof(data) == "string" then
+                return data
             end
         end
     end
+    for key, val in pairs(roles) do
+        if typeof(key) == "string" and typeof(val) == "string" then
+            if val == plr.Name or val == plr.DisplayName then
+                return key
+            end
+        end
+    end
+    for key, val in pairs(roles) do
+        if typeof(key) == "string" then
+            if typeof(val) == "number" and val == plr.UserId then
+                return key
+            elseif typeof(val) == "userdata" and val == plr then
+                return key
+            end
+        end
+    end
+    return nil
+end
+
+-- ============================================================
+-- GetRoleColor — TOOL HOLDER ONLY (no role data fallback for Sheriff)
+-- This makes blue follow whoever holds the gun RIGHT NOW.
+-- Murderer is only red if they currently hold the knife.
+-- ============================================================
+local function GetRoleColor(player)
     local function hasTool(name)
         local bp = player:FindFirstChild("Backpack")
         local ch = player.Character
@@ -74,14 +105,14 @@ local function GetRoleColor(player)
         return false
     end
     if hasTool("Knife") then return RoleColors.Murderer end
-    if hasTool("Gun") then return RoleColors.Sheriff end
+    if hasTool("Gun")   then return RoleColors.Sheriff  end
+    -- No tool = not the current murderer or sheriff. Show as innocent.
     return RoleColors.Innocent
 end
 
 -- ============================================================
--- ESP / COMBAT STATE
+-- STATE
 -- ============================================================
-local outlineOnlyEnabled = true
 local skeletonEnabled = true
 local skeletonThickness = 1
 local boxEnabled = false
@@ -96,7 +127,7 @@ local aimbotSmoothing = 0.2
 local aimbotFOV = 150
 local aimbotPart = "Head"
 local aimbotKey = "Right Click"
-local aimbotTarget = "Murderer"  -- "All" or "Murderer"
+local aimbotTarget = "Murderer"
 local aiming = false
 
 local killAuraEnabled = false
@@ -107,18 +138,18 @@ local fastThrowConnection = nil
 local fastThrowDelay = 0.05
 
 local flingTargetName = ""
-local activeFlingTarget = nil
 
 local coinFarmEnabled = false
 local coinFarmConnection = nil
 local coinFarmSpeed = 1
 local coinFarmWarmup = 0.25
 
--- Silent Aim loop handle
 local silentAimLoop = nil
--- Forward references so toggles can control each other
 local silentAimToggleRef = nil
 local triggerbotToggleRef = nil
+
+local antiFlingEnabled = false
+local antiFlingConnections = {}
 
 -- ============================================================
 -- ROOT
@@ -128,9 +159,7 @@ pcall(function()
     if gethui then guiParent = gethui() end
 end)
 if not guiParent then
-    pcall(function()
-        guiParent = game:GetService("CoreGui")
-    end)
+    pcall(function() guiParent = game:GetService("CoreGui") end)
 end
 if not guiParent then
     guiParent = LocalPlayer:WaitForChild("PlayerGui")
@@ -283,13 +312,15 @@ local function RunLoadingSequence()
 end
 
 -- ============================================================
--- DROPDOWN SYSTEM
+-- DROPDOWN
 -- ============================================================
 local DropdownLayer = Instance.new("Frame")
 DropdownLayer.Size = UDim2.fromScale(1, 1)
 DropdownLayer.BackgroundTransparency = 1
 DropdownLayer.BorderSizePixel = 0
 DropdownLayer.Visible = false
+DropdownLayer.Active = false
+DropdownLayer.Selectable = false
 DropdownLayer.ZIndex = 5000
 DropdownLayer.Parent = ScreenGui
 
@@ -327,12 +358,14 @@ local function closeDropdown()
     activeDropdown = nil
     DropdownMenu.Visible = false
     DropdownLayer.Visible = false
+    DropdownLayer.Active = false
     for _, child in ipairs(DropdownScroll:GetChildren()) do
         if child:IsA("GuiObject") then child:Destroy() end
     end
 end
 
 DropdownLayer.InputBegan:Connect(function(input)
+    if not DropdownMenu.Visible then return end
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
         closeDropdown()
     end
@@ -358,27 +391,22 @@ ApplyTheme = function(name)
         if w.titleDot then w.titleDot.BackgroundColor3 = ACCENT end
         if w.scroll then w.scroll.ScrollBarImageColor3 = ACCENT_DIM end
     end
-
     for _, tog in ipairs(ThemedElements.toggles) do
         if tog.render then pcall(tog.render) end
     end
-
     for _, b in ipairs(ThemedElements.buttons) do
         if b.stroke then b.stroke.Color = BORDER end
         if b.bar then b.bar.BackgroundColor3 = BORDER end
         if b.label then b.label.TextColor3 = TEXT end
     end
-
     for _, d in ipairs(ThemedElements.dropdowns) do
         if d.stroke then d.stroke.Color = BORDER end
         if d.bar then d.bar.BackgroundColor3 = BORDER end
         if d.valueTxt then d.valueTxt.TextColor3 = TEXT_ON end
     end
-
     for _, s in ipairs(ThemedElements.sections) do
         if s then s.TextColor3 = ACCENT_DIM end
     end
-
     if DStroke then DStroke.Color = ACCENT_DIM end
     if DropdownScroll then DropdownScroll.ScrollBarImageColor3 = ACCENT end
 end
@@ -754,6 +782,7 @@ local function CreateWindow(title, posX, posY)
             closeDropdown()
             activeDropdown = Btn
             DropdownLayer.Visible = true
+            DropdownLayer.Active = true
             local absPos = Btn.AbsolutePosition
             local absSize = Btn.AbsoluteSize
             local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
@@ -814,7 +843,7 @@ local function CreateWindow(title, posX, posY)
         }
     end
 
-    local function CreateInput(label, placeholder, callback)
+    local function CreateInput(label, placeholder, callback, onEnter)
         local Btn = Instance.new("TextButton")
         Btn.Size = UDim2.new(1, 0, 0, 24)
         Btn.BackgroundColor3 = BG_ITEM
@@ -864,9 +893,15 @@ local function CreateWindow(title, posX, posY)
         Instance.new("UICorner", InputBox).CornerRadius = UDim.new(0, 3)
 
         InputBox.FocusLost:Connect(function(enterPressed)
-            if enterPressed and callback then
-                local ok, err = pcall(callback, InputBox.Text)
-                if not ok then warn("[Blackout] " .. tostring(err)) end
+            if enterPressed then
+                if callback then
+                    local ok, err = pcall(callback, InputBox.Text)
+                    if not ok then warn("[Blackout] " .. tostring(err)) end
+                end
+                if onEnter then
+                    local ok, err = pcall(onEnter, InputBox.Text)
+                    if not ok then warn("[Blackout] " .. tostring(err)) end
+                end
             end
         end)
 
@@ -977,7 +1012,7 @@ end
 StartRoleTracking()
 
 -- ============================================================
--- OUTLINE ONLY ESP
+-- OUTLINE ESP
 -- ============================================================
 local function StartOutlineESP()
     getgenv().PlayerOutlineObjects = {}
@@ -1025,7 +1060,7 @@ local function StartOutlineESP()
 
     getgenv().PlayerOutlineRefreshLoop = task.spawn(function()
         while getgenv().OutlineESPActive do
-            task.wait(1)
+            task.wait(0.1)
             for _, plr in ipairs(Players:GetPlayers()) do
                 if plr ~= LocalPlayer then
                     if not getgenv().PlayerOutlineObjects[plr] then
@@ -1520,7 +1555,6 @@ local function getClosestPlayerInFOV()
         if plr ~= LocalPlayer and plr.Character then
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
             if hum and hum.Health > 0 then
-                -- Target filter
                 if aimbotTarget == "Murderer" then
                     local hasKnife = plr.Character:FindFirstChild("Knife") or
                         (plr.Backpack and plr.Backpack:FindFirstChild("Knife"))
@@ -1638,24 +1672,82 @@ local function StopFastThrow()
 end
 
 -- ============================================================
--- FLING — WeAreDevs spin fling + TP on top + return
+-- ANTI FLING
 -- ============================================================
-local flingActive = false
-local flingTarget = nil
-local flingBV = nil
-local flingConn = nil
-local flingOrigCF = nil
-local flingOriginalCanCollide = {}
+local function StartAntiFling()
+    local function disableParts(char)
+        if not char then return end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+        local conn = char.DescendantAdded:Connect(function(c)
+            if c:IsA("BasePart") then
+                c.CanCollide = false
+            end
+        end)
+        table.insert(antiFlingConnections, conn)
+    end
 
-local function CleanupFling()
-    if flingBV then
+    local function trackPlayer(plr)
+        if plr == LocalPlayer then return end
+        if plr.Character then disableParts(plr.Character) end
+        local c1 = plr.CharacterAdded:Connect(disableParts)
+        table.insert(antiFlingConnections, c1)
+    end
+
+    for _, plr in ipairs(Players:GetPlayers()) do trackPlayer(plr) end
+    local c2 = Players.PlayerAdded:Connect(trackPlayer)
+    table.insert(antiFlingConnections, c2)
+
+    antiFlingConnections.renderConn = RunService.Heartbeat:Connect(function()
+        if not antiFlingEnabled then return end
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                for _, part in ipairs(plr.Character:GetDescendants()) do
+                    if part:IsA("BasePart") and part.CanCollide then
+                        part.CanCollide = false
+                    end
+                end
+            end
+        end
+    end)
+end
+
+local function StopAntiFling()
+    for _, conn in ipairs(antiFlingConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    if antiFlingConnections.renderConn then
+        pcall(function() antiFlingConnections.renderConn:Disconnect() end)
+        antiFlingConnections.renderConn = nil
+    end
+    antiFlingConnections = {}
+end
+
+-- ============================================================
+-- FLING — WeAreDevs spin + TP onto target
+-- ============================================================
+local flinging = false
+local flingTargetPlayer = nil
+local flingBV = nil
+local flingNoclipConn = nil
+local flingReturnCF = nil
+local flingOrigCanCollide = {}
+local flingOrigMassless = {}
+
+local function StopFling()
+    flinging = false
+    if flingBV and flingBV.Parent then
         pcall(function() flingBV:Destroy() end)
-        flingBV = nil
     end
-    if flingConn then
-        pcall(function() flingConn:Disconnect() end)
-        flingConn = nil
+    flingBV = nil
+    if flingNoclipConn then
+        pcall(function() flingNoclipConn:Disconnect() end)
     end
+    flingNoclipConn = nil
+
     local char = LocalPlayer.Character
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
@@ -1664,99 +1756,93 @@ local function CleanupFling()
             pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
         end
         local hrp = char:FindFirstChild("HumanoidRootPart")
-        if hrp and hrp.Parent then
-            pcall(function()
-                hrp.AssemblyLinearVelocity = Vector3.zero
-                hrp.AssemblyAngularVelocity = Vector3.zero
-            end)
-            if flingOrigCF then
-                hrp.CFrame = flingOrigCF
-            end
+        if hrp and hrp.Parent and flingReturnCF then
+            pcall(function() hrp.CFrame = flingReturnCF end)
         end
-        for part, val in pairs(flingOriginalCanCollide) do
+        for part, val in pairs(flingOrigCanCollide) do
             if part and part.Parent then
                 pcall(function() part.CanCollide = val end)
             end
         end
-        flingOriginalCanCollide = {}
+        for part, val in pairs(flingOrigMassless) do
+            if part and part.Parent then
+                pcall(function() part.Massless = val end)
+            end
+        end
     end
-    flingActive = false
-    flingTarget = nil
-    flingOrigCF = nil
-end
-
-local function StopFling()
-    CleanupFling()
+    flingOrigCanCollide = {}
+    flingOrigMassless = {}
+    flingTargetPlayer = nil
+    flingReturnCF = nil
 end
 
 local function FlingPlayer(targetPlayer)
-    if flingActive then
-        CleanupFling()
-        task.wait(0.05)
+    if flinging then StopFling(); task.wait(0.1) end
+    if not targetPlayer or not targetPlayer.Character then
+        warn("[Fling] No target")
+        return
     end
-    if not targetPlayer or not targetPlayer.Character then return end
-    local targetHRP = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not targetHRP then return end
+    local targetChar = targetPlayer.Character
+    local targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
+    if not targetHRP then warn("[Fling] No target HRP"); return end
 
     local char = LocalPlayer.Character
     if not char then return end
     local hrp = char:FindFirstChild("HumanoidRootPart")
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hrp or not hum then return end
+    if not hrp then return end
 
-    flingActive = true
-    flingTarget = targetPlayer
-    flingOrigCF = hrp.CFrame
+    flinging = true
+    flingTargetPlayer = targetPlayer
+    flingReturnCF = hrp.CFrame
+    flingOrigCanCollide = {}
+    flingOrigMassless = {}
 
-    flingOriginalCanCollide = {}
-    for _, v in ipairs(char:GetChildren()) do
+    local charParts = char:GetChildren()
+    for _, v in next, charParts do
         if v:IsA("BasePart") then
-            flingOriginalCanCollide[v] = v.CanCollide
+            flingOrigCanCollide[v] = v.CanCollide
+            flingOrigMassless[v] = v.Massless
             v.CanCollide = false
             v.Massless = true
             v.Velocity = Vector3.zero
         end
     end
 
-    pcall(function() hum.PlatformStand = true end)
-
-    hrp.CFrame = targetHRP.CFrame + Vector3.new(0, 3, 0)
-
     local bv = Instance.new("BodyAngularVelocity")
-    bv.Name = "FlingBV"
-    bv.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    bv.MaxTorque = Vector3.new(1, 1, 1) * math.huge
     bv.P = math.huge
     bv.AngularVelocity = Vector3.new(0, 9e5, 0)
     bv.Parent = hrp
+    bv.Name = "FlingBV"
     flingBV = bv
 
-    flingConn = RunService.Stepped:Connect(function()
-        if not flingActive then return end
-        for _, v in ipairs(char:GetChildren()) do
+    flingNoclipConn = RunService.Stepped:Connect(function()
+        for i, v in next, charParts do
             if v:IsA("BasePart") then
                 v.CanCollide = false
             end
         end
     end)
 
+    hrp.CFrame = CFrame.new(targetHRP.Position + Vector3.new(0, 1, 0))
+
     task.spawn(function()
         local t0 = tick()
-        while flingActive and tick() - t0 < 2.5 do
-            if flingTarget and flingTarget.Character then
-                local tHRP = flingTarget.Character:FindFirstChild("HumanoidRootPart")
-                if tHRP and hrp and hrp.Parent then
-                    hrp.CFrame = tHRP.CFrame + Vector3.new(0, 3, 0)
-                    hrp.AssemblyLinearVelocity = Vector3.zero
-                end
-            end
+        while flinging and tick() - t0 < 2 do
+            if not flingTargetPlayer or not flingTargetPlayer.Character then break end
+            local tHRP = flingTargetPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if not tHRP or not hrp or not hrp.Parent then break end
+            pcall(function()
+                hrp.CFrame = CFrame.new(tHRP.Position + Vector3.new(0, 1, 0))
+            end)
             RunService.Heartbeat:Wait()
         end
-        CleanupFling()
+        StopFling()
     end)
 end
 
 local function FlingByName(name)
-    if not name or name == "" then return end
+    if not name or name == "" then warn("[Fling] Enter a username"); return end
     local lower = name:lower()
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer then
@@ -1769,32 +1855,36 @@ local function FlingByName(name)
     warn("[Fling] No player found: " .. name)
 end
 
-local function FlingMurderer()
+local function GetMurderer()
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer and plr.Character then
             local hasKnife = plr.Character:FindFirstChild("Knife") or
                 (plr.Backpack and plr.Backpack:FindFirstChild("Knife"))
-            if hasKnife then
-                FlingPlayer(plr)
-                return
-            end
+            if hasKnife then return plr end
         end
     end
-    warn("[Fling] No murderer in round")
+    return nil
 end
 
-local function FlingSheriff()
+local function GetSheriff()
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer and plr.Character then
             local hasGun = plr.Character:FindFirstChild("Gun") or
                 (plr.Backpack and plr.Backpack:FindFirstChild("Gun"))
-            if hasGun then
-                FlingPlayer(plr)
-                return
-            end
+            if hasGun then return plr end
         end
     end
-    warn("[Fling] No sheriff in round")
+    return nil
+end
+
+local function FlingMurderer()
+    local t = GetMurderer()
+    if t then FlingPlayer(t) else warn("[Fling] No murderer found") end
+end
+
+local function FlingSheriff()
+    local t = GetSheriff()
+    if t then FlingPlayer(t) else warn("[Fling] No sheriff found") end
 end
 
 -- ============================================================
@@ -2116,6 +2206,7 @@ local function StopPerfMode()
     end
 end
 
+-- TP in front of target, facing them
 local function TpToRandomPlayer()
     local char = LocalPlayer.Character
     if not char then return end
@@ -2130,7 +2221,8 @@ local function TpToRandomPlayer()
     end
     if #candidates == 0 then return end
     local target = candidates[math.random(1, #candidates)]
-    hrp.CFrame = target.CFrame + Vector3.new(0, 3, 0)
+    local front = target.Position + target.CFrame.LookVector * 3
+    hrp.CFrame = CFrame.new(front, target.Position)
 end
 
 local function TpToSheriff()
@@ -2138,19 +2230,12 @@ local function TpToSheriff()
     if not char then return end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character then
-            local hasGun = plr.Character:FindFirstChild("Gun") or
-                (plr.Backpack and plr.Backpack:FindFirstChild("Gun"))
-            if hasGun then
-                local targetHRP = plr.Character:FindFirstChild("HumanoidRootPart")
-                if targetHRP then
-                    hrp.CFrame = targetHRP.CFrame + Vector3.new(0, 3, 0)
-                    return
-                end
-            end
-        end
-    end
+    local target = GetSheriff()
+    if not target or not target.Character then return end
+    local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
+    if not targetHRP then return end
+    local front = targetHRP.Position + targetHRP.CFrame.LookVector * 3
+    hrp.CFrame = CFrame.new(front, targetHRP.Position)
 end
 
 local function TpToMurderer()
@@ -2158,19 +2243,12 @@ local function TpToMurderer()
     if not char then return end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character then
-            local hasKnife = plr.Character:FindFirstChild("Knife") or
-                (plr.Backpack and plr.Backpack:FindFirstChild("Knife"))
-            if hasKnife then
-                local targetHRP = plr.Character:FindFirstChild("HumanoidRootPart")
-                if targetHRP then
-                    hrp.CFrame = targetHRP.CFrame + Vector3.new(0, 3, 0)
-                    return
-                end
-            end
-        end
-    end
+    local target = GetMurderer()
+    if not target or not target.Character then return end
+    local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
+    if not targetHRP then return end
+    local front = targetHRP.Position + targetHRP.CFrame.LookVector * 3
+    hrp.CFrame = CFrame.new(front, targetHRP.Position)
 end
 
 local function StartInfJump()
@@ -2242,36 +2320,6 @@ local function StopAutoBarriers()
     if getgenv().BarrierAutoConn then
         getgenv().BarrierAutoConn:Disconnect()
         getgenv().BarrierAutoConn = nil
-    end
-end
-
-local function StartInvisible()
-    local char = LocalPlayer.Character
-    if not char then return end
-    for _, part in pairs(char:GetDescendants()) do
-        if part:IsA("BasePart") then
-            part.LocalTransparencyModifier = 1
-        end
-    end
-    getgenv().InvisConn = char.DescendantAdded:Connect(function(d)
-        if d:IsA("BasePart") then
-            d.LocalTransparencyModifier = 1
-        end
-    end)
-end
-
-local function StopInvisible()
-    if getgenv().InvisConn then
-        getgenv().InvisConn:Disconnect()
-        getgenv().InvisConn = nil
-    end
-    local char = LocalPlayer.Character
-    if char then
-        for _, part in pairs(char:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.LocalTransparencyModifier = 0
-            end
-        end
     end
 end
 
@@ -2389,8 +2437,9 @@ UtilityPanel.CreateSection("utility")
 UtilityPanel.CreateToggle("Remove Barriers", false, function(s)
     if s then StartAutoBarriers() else StopAutoBarriers() end
 end)
-UtilityPanel.CreateToggle("Invisible", false, function(s)
-    if s then StartInvisible() else StopInvisible() end
+UtilityPanel.CreateToggle("Anti Fling", false, function(s)
+    antiFlingEnabled = s
+    if s then StartAntiFling() else StopAntiFling() end
 end)
 
 -- ============================================================
@@ -2454,6 +2503,9 @@ end)
 CombatPanel.CreateSection("fling")
 CombatPanel.CreateInput("FLING TARGET", "username", function(v)
     flingTargetName = v
+end, function(v)
+    -- On Enter: fling immediately
+    FlingByName(v)
 end)
 CombatPanel.CreateButton("Fling Target", function()
     FlingByName(flingTargetName)
