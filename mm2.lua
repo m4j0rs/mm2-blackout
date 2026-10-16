@@ -21,6 +21,23 @@ local RoundEndEvent      = Remotes:WaitForChild("RoundEndFade")
 local RoundStartEvent    = Remotes:WaitForChild("TeleportToPart")
 
 -- ============================================================
+-- FONT / TEXT SHARPNESS HELPERS
+-- ============================================================
+local STROKE_BG = Color3.fromRGB(8, 8, 10)
+local STROKE_STRENGTH = 0.72
+
+local function SharpenText(label, strokeColor, strength)
+    label.TextScaled = false
+    label.RichText = false
+    label.TextStrokeTransparency = strength or STROKE_STRENGTH
+    label.TextStrokeColor3 = strokeColor or STROKE_BG
+    if label.TextSize % 1 ~= 0 then
+        label.TextSize = math.floor(label.TextSize)
+    end
+    return label
+end
+
+-- ============================================================
 -- THEME
 -- ============================================================
 local THEMES = {
@@ -44,7 +61,7 @@ local TEXT        = Color3.fromRGB(255, 255, 255)
 local TEXT_DIM    = Color3.fromRGB(170, 170, 178)
 local TEXT_ON     = THEMES.RED.accent
 
-local ThemedElements = { windows = {}, toggles = {}, buttons = {}, dropdowns = {}, sections = {} }
+local ThemedElements = { windows = {}, toggles = {}, buttons = {}, dropdowns = {}, sections = {}, notifications = {} }
 
 -- ============================================================
 -- ROLE COLORS
@@ -71,10 +88,6 @@ local function GetRoleFromData(plr)
 end
 
 local function GetRoleColor(player)
-    local serverRole = GetRoleFromData(player)
-    if serverRole and RoleColors[serverRole] then
-        return RoleColors[serverRole]
-    end
     local function hasTool(name)
         local bp = player:FindFirstChild("Backpack")
         local ch = player.Character
@@ -82,8 +95,15 @@ local function GetRoleColor(player)
         if ch and ch:FindFirstChild(name) then return true end
         return false
     end
+
     if hasTool("Knife") then return RoleColors.Murderer end
     if hasTool("Gun")   then return RoleColors.Sheriff  end
+
+    local serverRole = GetRoleFromData(player)
+    if serverRole and RoleColors[serverRole] then
+        return RoleColors[serverRole]
+    end
+
     return RoleColors.Innocent
 end
 
@@ -107,20 +127,8 @@ local aimbotKey = "Right Click"
 local aimbotTarget = "Murderer"
 local aiming = false
 
-local killAuraEnabled = false
-local killAuraRange = 15
-
--- KNIFE SCRIPT STATE
 local knifeAuraEnabled = false
 local knifeAuraRange = 15
-local autoThrowEnabled = false
-local autoThrowRange = 100
-local silentKnifeEnabled = false
-local silentKnifeRate = 0.15
-
-local fastThrowEnabled = false
-local fastThrowConnection = nil
-local fastThrowDelay = 0.05
 
 local flingTargetName = ""
 
@@ -160,6 +168,119 @@ ScreenGui.Enabled = false
 ScreenGui.Parent = guiParent
 
 -- ============================================================
+-- NOTIFICATION SYSTEM  (bottom-right, black card, themed accent)
+-- ============================================================
+local NOTIFY_BG = Color3.fromRGB(8, 8, 10)
+
+local NotifyContainer = Instance.new("Frame")
+NotifyContainer.Name = "BlackoutNotifications"
+NotifyContainer.BackgroundTransparency = 1
+NotifyContainer.Position = UDim2.new(1, -20, 1, -20)
+NotifyContainer.AnchorPoint = Vector2.new(1, 1)
+NotifyContainer.Size = UDim2.new(0, 300, 0, 0)
+NotifyContainer.AutomaticSize = Enum.AutomaticSize.Y
+NotifyContainer.ZIndex = 6000
+NotifyContainer.Parent = ScreenGui
+
+local NotifyLayout = Instance.new("UIListLayout")
+NotifyLayout.Padding = UDim.new(0, 6)
+NotifyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+NotifyLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+NotifyLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+NotifyLayout.Parent = NotifyContainer
+
+local notifyCounter = 0
+
+local function ShowNotification(title, body, opts)
+    opts = opts or {}
+    local duration = opts.duration or 4
+    notifyCounter = notifyCounter + 1
+
+    local notif = Instance.new("Frame")
+    notif.BackgroundColor3 = NOTIFY_BG
+    notif.BorderSizePixel = 0
+    notif.Size = UDim2.new(1, 0, 0, 54)
+    notif.Position = UDim2.new(0, 340, 0, 0)
+    notif.LayoutOrder = notifyCounter
+    notif.ZIndex = 6001
+    notif.Parent = NotifyContainer
+    Instance.new("UICorner", notif).CornerRadius = UDim.new(0, 4)
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(30, 30, 34)
+    stroke.Thickness = 1
+    stroke.Parent = notif
+
+    -- Accent bar on left — themed
+    local accentBar = Instance.new("Frame")
+    accentBar.Size = UDim2.new(0, 3, 1, 0)
+    accentBar.Position = UDim2.new(0, 0, 0, 0)
+    accentBar.BackgroundColor3 = ACCENT
+    accentBar.BorderSizePixel = 0
+    accentBar.ZIndex = 6002
+    accentBar.Parent = notif
+    Instance.new("UICorner", accentBar).CornerRadius = UDim.new(0, 4)
+
+    local accentGlow = Instance.new("UIStroke")
+    accentGlow.Color = ACCENT
+    accentGlow.Thickness = 2
+    accentGlow.Transparency = 0.5
+    accentGlow.Parent = accentBar
+
+    -- Accent dot — themed
+    local dot = Instance.new("Frame")
+    dot.Size = UDim2.new(0, 5, 0, 5)
+    dot.Position = UDim2.new(0, 12, 0, 12)
+    dot.BackgroundColor3 = ACCENT
+    dot.BorderSizePixel = 0
+    dot.ZIndex = 6003
+    dot.Parent = notif
+    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+    -- Title — white
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Size = UDim2.new(1, -28, 0, 16)
+    titleLbl.Position = UDim2.new(0, 22, 0, 8)
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.Text = string.upper(title)
+    titleLbl.TextColor3 = TEXT
+    titleLbl.Font = Enum.Font.Code
+    titleLbl.TextSize = 12
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.ZIndex = 6003
+    titleLbl.Parent = notif
+    SharpenText(titleLbl, STROKE_BG, 0.6)
+
+    -- Body — white
+    local bodyLbl = Instance.new("TextLabel")
+    bodyLbl.Size = UDim2.new(1, -28, 0, 18)
+    bodyLbl.Position = UDim2.new(0, 22, 0, 28)
+    bodyLbl.BackgroundTransparency = 1
+    bodyLbl.Text = body
+    bodyLbl.TextColor3 = TEXT
+    bodyLbl.Font = Enum.Font.Code
+    bodyLbl.TextSize = 11
+    bodyLbl.TextXAlignment = Enum.TextXAlignment.Left
+    bodyLbl.TextTruncate = Enum.TextTruncate.AtEnd
+    bodyLbl.ZIndex = 6003
+    bodyLbl.Parent = notif
+    SharpenText(bodyLbl, STROKE_BG, 0.65)
+
+    table.insert(ThemedElements.notifications, { accentBar = accentBar, dot = dot })
+
+    TweenService:Create(notif, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {Position = UDim2.new(0, 0, 0, 0)}):Play()
+
+    task.delay(duration, function()
+        if not notif.Parent then return end
+        TweenService:Create(notif, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+            {Position = UDim2.new(0, 340, 0, 0)}):Play()
+        task.wait(0.32)
+        if notif then notif:Destroy() end
+    end)
+end
+
+-- ============================================================
 -- LOADING SPLASH
 -- ============================================================
 local LoadGui = Instance.new("ScreenGui")
@@ -170,129 +291,172 @@ LoadGui.DisplayOrder = 2147483647
 LoadGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 LoadGui.Parent = guiParent
 
-local LoadBG = Instance.new("Frame")
-LoadBG.Size = UDim2.new(1, 0, 1, 0)
-LoadBG.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-LoadBG.BorderSizePixel = 0
-LoadBG.BackgroundTransparency = 1
-LoadBG.Parent = LoadGui
+local LoadRoot = Instance.new("Frame")
+LoadRoot.Size = UDim2.fromScale(1, 1)
+LoadRoot.BackgroundTransparency = 1
+LoadRoot.BorderSizePixel = 0
+LoadRoot.Parent = LoadGui
 
 local LoadCenter = Instance.new("Frame")
-LoadCenter.Size = UDim2.new(0, 400, 0, 160)
+LoadCenter.Size = UDim2.new(0, 600, 0, 200)
 LoadCenter.Position = UDim2.new(0.5, 0, 0.5, 0)
 LoadCenter.AnchorPoint = Vector2.new(0.5, 0.5)
 LoadCenter.BackgroundTransparency = 1
-LoadCenter.Parent = LoadBG
+LoadCenter.Parent = LoadRoot
+
+local GlitchLeft = Instance.new("TextLabel")
+GlitchLeft.Size = UDim2.new(1, 0, 0, 90)
+GlitchLeft.BackgroundTransparency = 1
+GlitchLeft.Text = ""
+GlitchLeft.Font = Enum.Font.Code
+GlitchLeft.TextSize = 64
+GlitchLeft.TextColor3 = Color3.fromRGB(80, 200, 255)
+GlitchLeft.TextTransparency = 1
+GlitchLeft.TextStrokeTransparency = 1
+GlitchLeft.ZIndex = 2
+GlitchLeft.Parent = LoadCenter
+
+local GlitchRight = Instance.new("TextLabel")
+GlitchRight.Size = UDim2.new(1, 0, 0, 90)
+GlitchRight.BackgroundTransparency = 1
+GlitchRight.Text = ""
+GlitchRight.Font = Enum.Font.Code
+GlitchRight.TextSize = 64
+GlitchRight.TextColor3 = Color3.fromRGB(255, 80, 120)
+GlitchRight.TextTransparency = 1
+GlitchRight.TextStrokeTransparency = 1
+GlitchRight.ZIndex = 2
+GlitchRight.Parent = LoadCenter
 
 local LogoLbl = Instance.new("TextLabel")
-LogoLbl.Size = UDim2.new(1, 0, 0, 70)
+LogoLbl.Size = UDim2.new(1, 0, 0, 90)
 LogoLbl.BackgroundTransparency = 1
 LogoLbl.Text = ""
 LogoLbl.Font = Enum.Font.Code
-LogoLbl.TextSize = 48
-LogoLbl.TextColor3 = THEMES.RED.accent
+LogoLbl.TextSize = 64
+LogoLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
 LogoLbl.TextTransparency = 1
 LogoLbl.TextStrokeTransparency = 1
-LogoLbl.TextStrokeColor3 = Color3.fromRGB(255, 90, 100)
+LogoLbl.TextStrokeColor3 = THEMES.RED.accent
+LogoLbl.ZIndex = 3
 LogoLbl.Parent = LoadCenter
 
 local SubLbl = Instance.new("TextLabel")
 SubLbl.Size = UDim2.new(1, 0, 0, 20)
-SubLbl.Position = UDim2.new(0, 0, 0, 76)
+SubLbl.Position = UDim2.new(0, 0, 0, 96)
 SubLbl.BackgroundTransparency = 1
-SubLbl.Text = "LOADING // PLEASE WAIT"
+SubLbl.Text = ""
 SubLbl.Font = Enum.Font.Code
 SubLbl.TextSize = 12
 SubLbl.TextColor3 = THEMES.RED.dim
 SubLbl.TextTransparency = 1
+SubLbl.TextXAlignment = Enum.TextXAlignment.Center
+SubLbl.ZIndex = 3
 SubLbl.Parent = LoadCenter
+SharpenText(SubLbl, STROKE_BG, 0.55)
 
-local BarBg = Instance.new("Frame")
-BarBg.Size = UDim2.new(0, 320, 0, 4)
-BarBg.Position = UDim2.new(0.5, -160, 0, 112)
-BarBg.BackgroundColor3 = Color3.fromRGB(30, 15, 18)
-BarBg.BorderSizePixel = 0
-BarBg.BackgroundTransparency = 1
-BarBg.Parent = LoadCenter
-Instance.new("UICorner", BarBg).CornerRadius = UDim.new(1, 0)
+local Underline = Instance.new("Frame")
+Underline.Size = UDim2.new(0, 0, 0, 2)
+Underline.Position = UDim2.new(0.5, 0, 0, 122)
+Underline.AnchorPoint = Vector2.new(0.5, 0.5)
+Underline.BackgroundColor3 = THEMES.RED.accent
+Underline.BorderSizePixel = 0
+Underline.ZIndex = 3
+Underline.Parent = LoadCenter
+Instance.new("UICorner", Underline).CornerRadius = UDim.new(1, 0)
 
-local BarFill = Instance.new("Frame")
-BarFill.Size = UDim2.new(0, 0, 1, 0)
-BarFill.BackgroundColor3 = THEMES.RED.accent
-BarFill.BorderSizePixel = 0
-BarFill.Parent = BarBg
-Instance.new("UICorner", BarFill).CornerRadius = UDim.new(1, 0)
-
-local BarGlow = Instance.new("UIStroke")
-BarGlow.Color = Color3.fromRGB(255, 90, 100)
-BarGlow.Thickness = 1
-BarGlow.Transparency = 0.4
-BarGlow.Parent = BarFill
-
-local PctLbl = Instance.new("TextLabel")
-PctLbl.Size = UDim2.new(1, 0, 0, 14)
-PctLbl.Position = UDim2.new(0, 0, 0, 122)
-PctLbl.BackgroundTransparency = 1
-PctLbl.Text = "0%"
-PctLbl.Font = Enum.Font.Code
-PctLbl.TextSize = 10
-PctLbl.TextColor3 = TEXT_DIM
-PctLbl.TextTransparency = 1
-PctLbl.Parent = LoadCenter
+local UnderlineGlow = Instance.new("UIStroke")
+UnderlineGlow.Color = Color3.fromRGB(255, 100, 120)
+UnderlineGlow.Thickness = 3
+UnderlineGlow.Transparency = 0.6
+UnderlineGlow.Parent = Underline
 
 local Scanlines = Instance.new("Frame")
-Scanlines.Size = UDim2.new(1, 0, 1, 0)
+Scanlines.Size = UDim2.fromScale(1, 1)
 Scanlines.BackgroundTransparency = 1
-Scanlines.Parent = LoadBG
+Scanlines.ZIndex = 10
+Scanlines.Parent = LoadRoot
 
-for i = 0, 60 do
+for i = 0, 80 do
     local Line = Instance.new("Frame")
     Line.Size = UDim2.new(1, 0, 0, 1)
-    Line.Position = UDim2.new(0, 0, 0, i * 14)
+    Line.Position = UDim2.new(0, 0, 0, i * 10)
     Line.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    Line.BackgroundTransparency = 0.97
+    Line.BackgroundTransparency = 1
     Line.BorderSizePixel = 0
+    Line.ZIndex = 10
     Line.Parent = Scanlines
 end
 
 local function RunLoadingSequence()
-    TweenService:Create(LoadBG, TweenInfo.new(0.35), {BackgroundTransparency = 0}):Play()
-    task.wait(0.1)
+    local fadeIn = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    TweenService:Create(GlitchLeft,  fadeIn, {TextTransparency = 0.85}):Play()
+    TweenService:Create(GlitchRight, fadeIn, {TextTransparency = 0.85}):Play()
+    TweenService:Create(LogoLbl, fadeIn, {TextTransparency = 0, TextStrokeTransparency = 0.55}):Play()
+    TweenService:Create(SubLbl,  fadeIn, {TextTransparency = 0.2}):Play()
+
+    task.wait(0.15)
+
+    for _, line in ipairs(Scanlines:GetChildren()) do
+        if line:IsA("Frame") then
+            TweenService:Create(line, TweenInfo.new(0.3), {BackgroundTransparency = 0.94}):Play()
+        end
+    end
+
     local text = "BLACKOUT"
     LogoLbl.Text = ""
-    TweenService:Create(LogoLbl, TweenInfo.new(0.3), {TextTransparency = 0, TextStrokeTransparency = 0.4}):Play()
-    TweenService:Create(SubLbl, TweenInfo.new(0.3), {TextTransparency = 0}):Play()
-    TweenService:Create(BarBg,  TweenInfo.new(0.3), {BackgroundTransparency = 0}):Play()
-    TweenService:Create(PctLbl, TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+    GlitchLeft.Text = ""
+    GlitchRight.Text = ""
     for i = 1, #text do
-        LogoLbl.Text = string.sub(text, 1, i)
-        task.wait(0.04)
+        local partial = string.sub(text, 1, i)
+        LogoLbl.Text = partial
+        GlitchLeft.Text = partial
+        GlitchRight.Text = partial
+        GlitchLeft.Position = UDim2.new(0, math.random(-3, -1), 0, math.random(-1, 1))
+        GlitchRight.Position = UDim2.new(0, math.random(1, 3), 0, math.random(-1, 1))
+        task.wait(0.055)
     end
+    GlitchLeft.Position = UDim2.new(0, -2, 0, 0)
+    GlitchRight.Position = UDim2.new(0, 2, 0, 0)
+
     for _ = 1, 3 do
+        GlitchLeft.Position  = UDim2.new(0, math.random(-5, -3), 0, 0)
+        GlitchRight.Position = UDim2.new(0, math.random(3, 5), 0, 0)
         LogoLbl.TextColor3 = Color3.fromRGB(255, 200, 200)
-        task.wait(0.05)
-        LogoLbl.TextColor3 = THEMES.RED.accent
-        task.wait(0.05)
+        task.wait(0.045)
+        GlitchLeft.Position  = UDim2.new(0, -2, 0, 0)
+        GlitchRight.Position = UDim2.new(0, 2, 0, 0)
+        LogoLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+        task.wait(0.045)
     end
-    local steps = 40
-    for i = 0, steps do
-        local pct = i / steps
-        BarFill.Size = UDim2.new(pct, 0, 1, 0)
-        PctLbl.Text = math.floor(pct * 100) .. "%"
-        task.wait(1.0 / steps)
+
+    TweenService:Create(Underline, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {Size = UDim2.new(0.55, 0, 0, 2)}):Play()
+
+    local subText = "INITIALIZING // PLEASE WAIT"
+    SubLbl.Text = ""
+    for i = 1, #subText do
+        SubLbl.Text = string.sub(subText, 1, i)
+        task.wait(0.018)
     end
-    task.wait(0.15)
-    local fadeInfo = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-    TweenService:Create(LogoLbl, fadeInfo, {TextTransparency = 1, TextStrokeTransparency = 1}):Play()
-    TweenService:Create(SubLbl, fadeInfo, {TextTransparency = 1}):Play()
-    TweenService:Create(BarBg,  fadeInfo, {BackgroundTransparency = 1}):Play()
-    TweenService:Create(PctLbl, fadeInfo, {TextTransparency = 1}):Play()
-    TweenService:Create(BarFill, fadeInfo, {BackgroundTransparency = 1}):Play()
-    TweenService:Create(BarGlow, fadeInfo, {Transparency = 1}):Play()
-    local bgTween = TweenService:Create(LoadBG, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundTransparency = 1})
-    bgTween:Play()
-    bgTween.Completed:Wait()
-    task.wait(0.05)
+
+    task.wait(0.55)
+
+    local fadeOut = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    TweenService:Create(GlitchLeft,  fadeOut, {TextTransparency = 1}):Play()
+    TweenService:Create(GlitchRight, fadeOut, {TextTransparency = 1}):Play()
+    TweenService:Create(LogoLbl, fadeOut, {TextTransparency = 1, TextStrokeTransparency = 1}):Play()
+    TweenService:Create(SubLbl,  fadeOut, {TextTransparency = 1, TextStrokeTransparency = 1}):Play()
+    TweenService:Create(Underline, fadeOut, {BackgroundTransparency = 1}):Play()
+    TweenService:Create(UnderlineGlow, fadeOut, {Transparency = 1}):Play()
+
+    for _, line in ipairs(Scanlines:GetChildren()) do
+        if line:IsA("Frame") then
+            TweenService:Create(line, fadeOut, {BackgroundTransparency = 1}):Play()
+        end
+    end
+
+    task.wait(0.5)
     LoadGui:Destroy()
 end
 
@@ -392,6 +556,11 @@ ApplyTheme = function(name)
     for _, s in ipairs(ThemedElements.sections) do
         if s then s.TextColor3 = ACCENT_DIM end
     end
+    -- Notifications: only recolor the accent bar + dot (bg stays black, text stays white)
+    for _, n in ipairs(ThemedElements.notifications) do
+        if n.accentBar then n.accentBar.BackgroundColor3 = ACCENT end
+        if n.dot then n.dot.BackgroundColor3 = ACCENT end
+    end
     if DStroke then DStroke.Color = ACCENT_DIM end
     if DropdownScroll then DropdownScroll.ScrollBarImageColor3 = ACCENT end
 end
@@ -459,6 +628,7 @@ local function CreateWindow(title, posX, posY)
     TitleLbl.TextSize = 13
     TitleLbl.TextXAlignment = Enum.TextXAlignment.Left
     TitleLbl.Parent = Header
+    SharpenText(TitleLbl, STROKE_BG, 0.6)
 
     local MinimizeBtn = Instance.new("TextButton")
     MinimizeBtn.Size = UDim2.new(0, 22, 0, 22)
@@ -472,6 +642,7 @@ local function CreateWindow(title, posX, posY)
     MinimizeBtn.BorderSizePixel = 0
     MinimizeBtn.Parent = Header
     Instance.new("UICorner", MinimizeBtn).CornerRadius = UDim.new(0, 3)
+    SharpenText(MinimizeBtn, STROKE_BG, 0.6)
 
     MinimizeBtn.MouseEnter:Connect(function()
         TweenService:Create(MinimizeBtn, TweenInfo.new(0.1), {TextColor3 = ACCENT}):Play()
@@ -523,9 +694,10 @@ local function CreateWindow(title, posX, posY)
         Lbl.Text = "── " .. string.upper(text)
         Lbl.TextColor3 = ACCENT_DIM
         Lbl.Font = Enum.Font.Code
-        Lbl.TextSize = 9
+        Lbl.TextSize = 10
         Lbl.TextXAlignment = Enum.TextXAlignment.Left
         Lbl.Parent = Scroll
+        SharpenText(Lbl, STROKE_BG, 0.65)
         table.insert(ThemedElements.sections, Lbl)
         return Lbl
     end
@@ -560,9 +732,10 @@ local function CreateWindow(title, posX, posY)
         Label.Text = string.upper(name)
         Label.TextColor3 = TEXT
         Label.Font = Enum.Font.Code
-        Label.TextSize = 10
+        Label.TextSize = 11
         Label.TextXAlignment = Enum.TextXAlignment.Left
         Label.Parent = Btn
+        SharpenText(Label, STROKE_BG, 0.65)
 
         local StatusTxt = Instance.new("TextLabel")
         StatusTxt.Size = UDim2.new(0, 30, 1, 0)
@@ -571,9 +744,10 @@ local function CreateWindow(title, posX, posY)
         StatusTxt.Text = "OFF"
         StatusTxt.TextColor3 = TEXT_DIM
         StatusTxt.Font = Enum.Font.Code
-        StatusTxt.TextSize = 10
+        StatusTxt.TextSize = 11
         StatusTxt.TextXAlignment = Enum.TextXAlignment.Right
         StatusTxt.Parent = Btn
+        SharpenText(StatusTxt, STROKE_BG, 0.65)
 
         local state = defaultState or false
 
@@ -674,9 +848,10 @@ local function CreateWindow(title, posX, posY)
         Label.Text = string.upper(name)
         Label.TextColor3 = TEXT
         Label.Font = Enum.Font.Code
-        Label.TextSize = 10
+        Label.TextSize = 11
         Label.TextXAlignment = Enum.TextXAlignment.Left
         Label.Parent = Btn
+        SharpenText(Label, STROKE_BG, 0.65)
 
         Btn.MouseEnter:Connect(function()
             TweenService:Create(Btn, TweenInfo.new(0.1), {BackgroundColor3 = BG_HOVER}):Play()
@@ -737,9 +912,10 @@ local function CreateWindow(title, posX, posY)
         Label.Text = string.upper(label)
         Label.TextColor3 = TEXT
         Label.Font = Enum.Font.Code
-        Label.TextSize = 10
+        Label.TextSize = 11
         Label.TextXAlignment = Enum.TextXAlignment.Left
         Label.Parent = Btn
+        SharpenText(Label, STROKE_BG, 0.65)
 
         local ValueTxt = Instance.new("TextLabel")
         ValueTxt.Size = UDim2.new(0.4, 0, 1, 0)
@@ -748,9 +924,10 @@ local function CreateWindow(title, posX, posY)
         ValueTxt.Text = tostring(value)
         ValueTxt.TextColor3 = TEXT_ON
         ValueTxt.Font = Enum.Font.Code
-        ValueTxt.TextSize = 10
+        ValueTxt.TextSize = 11
         ValueTxt.TextXAlignment = Enum.TextXAlignment.Right
         ValueTxt.Parent = Btn
+        SharpenText(ValueTxt, STROKE_BG, 0.65)
 
         local currentValue = value
 
@@ -791,12 +968,13 @@ local function CreateWindow(title, posX, posY)
                 o.Text = "  " .. tostring(opt)
                 o.TextColor3 = (opt == currentValue) and ACCENT or TEXT
                 o.Font = Enum.Font.Code
-                o.TextSize = 10
+                o.TextSize = 11
                 o.TextXAlignment = Enum.TextXAlignment.Left
                 o.LayoutOrder = i
                 o.ZIndex = 5003
                 o.Parent = DropdownScroll
                 Instance.new("UICorner", o).CornerRadius = UDim.new(0, 3)
+                SharpenText(o, STROKE_BG, 0.65)
                 o.MouseEnter:Connect(function()
                     TweenService:Create(o, TweenInfo.new(0.1), {BackgroundColor3 = BG_HOVER}):Play()
                 end)
@@ -858,9 +1036,10 @@ local function CreateWindow(title, posX, posY)
         Label.Text = string.upper(label)
         Label.TextColor3 = TEXT
         Label.Font = Enum.Font.Code
-        Label.TextSize = 10
+        Label.TextSize = 11
         Label.TextXAlignment = Enum.TextXAlignment.Left
         Label.Parent = Btn
+        SharpenText(Label, STROKE_BG, 0.65)
 
         local InputBox = Instance.new("TextBox")
         InputBox.Size = UDim2.new(0.5, 0, 0, 18)
@@ -872,10 +1051,11 @@ local function CreateWindow(title, posX, posY)
         InputBox.TextColor3 = TEXT
         InputBox.PlaceholderColor3 = TEXT_DIM
         InputBox.Font = Enum.Font.Code
-        InputBox.TextSize = 10
+        InputBox.TextSize = 11
         InputBox.ClearTextOnFocus = false
         InputBox.Parent = Btn
         Instance.new("UICorner", InputBox).CornerRadius = UDim.new(0, 3)
+        SharpenText(InputBox, STROKE_BG, 0.65)
 
         InputBox.FocusLost:Connect(function(enterPressed)
             if enterPressed then
@@ -1500,8 +1680,9 @@ local function createNameESP(plr)
     label.Size = UDim2.new(1, 0, 1, 0)
     label.BackgroundTransparency = 1
     label.TextStrokeTransparency = 0
+    label.TextStrokeColor3 = STROKE_BG
     label.TextSize = 14
-    label.Font = Enum.Font.ArialBold
+    label.Font = Enum.Font.GothamBold
     label.Text = plr.Name
     label.Parent = billboard
 
@@ -1613,40 +1794,7 @@ local function isAimInput(input)
 end
 
 -- ============================================================
--- KILL AURA
--- ============================================================
-local killAuraConnection = nil
-
-local function startKillAura()
-    if killAuraConnection then killAuraConnection:Disconnect() end
-    killAuraConnection = RunService.RenderStepped:Connect(function()
-        if not killAuraEnabled then return end
-        local char = LocalPlayer.Character
-        if not char then return end
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        local tool = char:FindFirstChildOfClass("Tool")
-        if not hrp or not tool then return end
-        if tool.Name ~= "Knife" then return end
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer and plr.Character then
-                local targetHRP = plr.Character:FindFirstChild("HumanoidRootPart")
-                if targetHRP and (targetHRP.Position - hrp.Position).Magnitude <= killAuraRange then
-                    pcall(function() tool:Activate() end)
-                end
-            end
-        end
-    end)
-end
-
-local function stopKillAura()
-    if killAuraConnection then
-        killAuraConnection:Disconnect()
-        killAuraConnection = nil
-    end
-end
-
--- ============================================================
--- KNIFE AURA
+-- KNIFE AURA (slash)
 -- ============================================================
 local knifeAuraConnection = nil
 
@@ -1676,149 +1824,6 @@ local function stopKnifeAura()
     if knifeAuraConnection then
         knifeAuraConnection:Disconnect()
         knifeAuraConnection = nil
-    end
-end
-
--- ============================================================
--- AUTO THROW KNIFE
--- ============================================================
-local autoThrowConnection = nil
-
-local function startAutoThrow()
-    if autoThrowConnection then autoThrowConnection:Disconnect() end
-    autoThrowConnection = RunService.RenderStepped:Connect(function()
-        if not autoThrowEnabled then return end
-        local char = LocalPlayer.Character
-        if not char then return end
-        local tool = char:FindFirstChildOfClass("Tool")
-        if not tool or tool.Name ~= "Knife" then return end
-
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        if not hrp then return end
-
-        local nearest, nearestDist = nil, autoThrowRange
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer and plr.Character then
-                local targetHRP = plr.Character:FindFirstChild("HumanoidRootPart")
-                if targetHRP then
-                    local d = (targetHRP.Position - hrp.Position).Magnitude
-                    if d < nearestDist then
-                        nearestDist = d
-                        nearest = targetHRP
-                    end
-                end
-            end
-        end
-
-        if nearest then
-            pcall(function() tool:Activate() end)
-        end
-    end)
-end
-
-local function stopAutoThrow()
-    if autoThrowConnection then
-        autoThrowConnection:Disconnect()
-        autoThrowConnection = nil
-    end
-end
-
--- ============================================================
--- SILENT KNIFE
--- ============================================================
-local silentKnifeConnection = nil
-
-local function findKnifeTarget()
-    local char = LocalPlayer.Character
-    if not char then return nil end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return nil end
-
-    local best, bestDist = nil, math.huge
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character then
-            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health > 0 then
-                local targetHRP = plr.Character:FindFirstChild("HumanoidRootPart")
-                if targetHRP then
-                    local d = (targetHRP.Position - hrp.Position).Magnitude
-                    if d < bestDist then
-                        bestDist = d
-                        best = { plr = plr, hrp = targetHRP }
-                    end
-                end
-            end
-        end
-    end
-    return best
-end
-
-local function fireSilentKnife()
-    if not silentKnifeEnabled then return end
-    local char = LocalPlayer.Character
-    if not char then return end
-    local knife = char:FindFirstChild("Knife")
-    if not knife then return end
-
-    local target = findKnifeTarget()
-    if not target then return end
-
-    local throwRemote = knife:FindFirstChild("Throw")
-        or knife:FindFirstChild("Fire")
-        or knife:FindFirstChild("Shoot")
-
-    if throwRemote then
-        pcall(function()
-            throwRemote:FireServer(
-                CFrame.new(char.HumanoidRootPart.Position, target.hrp.Position),
-                CFrame.new(target.hrp.Position)
-            )
-        end)
-    else
-        pcall(function() knife:Activate() end)
-    end
-end
-
-local function startSilentKnife()
-    silentKnifeEnabled = true
-    if silentKnifeConnection then silentKnifeConnection:Disconnect() end
-    silentKnifeConnection = RunService.RenderStepped:Connect(function()
-        if not silentKnifeEnabled then return end
-        if tick() - (getgenv()._lastSilentKnife or 0) < silentKnifeRate then return end
-        getgenv()._lastSilentKnife = tick()
-        pcall(fireSilentKnife)
-    end)
-end
-
-local function stopSilentKnife()
-    silentKnifeEnabled = false
-    if silentKnifeConnection then
-        silentKnifeConnection:Disconnect()
-        silentKnifeConnection = nil
-    end
-end
-
--- ============================================================
--- FAST THROW
--- ============================================================
-local function StartFastThrow()
-    if fastThrowConnection then fastThrowConnection:Disconnect() end
-    fastThrowConnection = RunService.RenderStepped:Connect(function()
-        if not fastThrowEnabled then return end
-        local char = LocalPlayer.Character
-        if not char then return end
-        local tool = char:FindFirstChildOfClass("Tool")
-        if not tool then return end
-        if tool.Name ~= "Knife" then return end
-        pcall(function() tool:Activate() end)
-        task.wait(fastThrowDelay)
-    end)
-end
-
-local function StopFastThrow()
-    if fastThrowConnection then
-        fastThrowConnection:Disconnect()
-        fastThrowConnection = nil
     end
 end
 
@@ -2153,6 +2158,102 @@ local function StopGunDropESP()
 end
 
 -- ============================================================
+-- GUN DROP NOTIFY  (dual-path reliable)
+--   Path A: any object named "GunDrop" spawning in Workspace
+--   Path B: any player who has a Gun dies (backup signal)
+--   Shared 3s debounce — only one notification per drop.
+-- ============================================================
+local function StartGunDropNotify()
+    if getgenv().GunDropNotifyConnection then
+        pcall(function() getgenv().GunDropNotifyConnection:Disconnect() end)
+        getgenv().GunDropNotifyConnection = nil
+    end
+    if getgenv().GunDropNotifyDiedConnections then
+        for _, c in ipairs(getgenv().GunDropNotifyDiedConnections) do
+            pcall(function() c:Disconnect() end)
+        end
+    end
+    getgenv().GunDropNotifyDiedConnections = {}
+
+    local lastNotify = 0
+
+    local function FireNotify(msg)
+        if tick() - lastNotify < 3 then return end
+        lastNotify = tick()
+        ShowNotification("Gun Drop", msg)
+    end
+
+    -- ---------- Path A: watch Workspace for GunDrop ----------
+    local function IsGunDropObject(obj)
+        if not obj or not obj.Parent then return false end
+        local n = obj.Name:lower()
+        if n == "gundrop" or n == "droppedgun" or n == "gun drop" then
+            return true
+        end
+        return false
+    end
+
+    local function OnDescendantAdded(obj)
+        if IsGunDropObject(obj) then
+            FireNotify("A gun has been dropped on the map")
+        end
+    end
+
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if IsGunDropObject(obj) then
+            FireNotify("A gun is currently on the ground")
+            break
+        end
+    end
+
+    getgenv().GunDropNotifyConnection = Workspace.DescendantAdded:Connect(OnDescendantAdded)
+
+    -- ---------- Path B: watch anyone holding a Gun die ----------
+    local function WatchCharacter(plr, char)
+        if not char then return end
+        local function OnDied()
+            local hadGun = char:FindFirstChild("Gun")
+                or (plr.Backpack and plr.Backpack:FindFirstChild("Gun"))
+            if hadGun then
+                FireNotify("The Sheriff has died")
+            end
+        end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            local conn = hum.Died:Connect(OnDied)
+            table.insert(getgenv().GunDropNotifyDiedConnections, conn)
+        end
+    end
+
+    local function WatchPlayer(plr)
+        if plr == LocalPlayer then return end
+        if plr.Character then WatchCharacter(plr, plr.Character) end
+        local conn = plr.CharacterAdded:Connect(function(char)
+            task.wait(0.5)
+            WatchCharacter(plr, char)
+        end)
+        table.insert(getgenv().GunDropNotifyDiedConnections, conn)
+    end
+
+    for _, plr in ipairs(Players:GetPlayers()) do WatchPlayer(plr) end
+    local addedConn = Players.PlayerAdded:Connect(WatchPlayer)
+    table.insert(getgenv().GunDropNotifyDiedConnections, addedConn)
+end
+
+local function StopGunDropNotify()
+    if getgenv().GunDropNotifyConnection then
+        pcall(function() getgenv().GunDropNotifyConnection:Disconnect() end)
+        getgenv().GunDropNotifyConnection = nil
+    end
+    if getgenv().GunDropNotifyDiedConnections then
+        for _, c in ipairs(getgenv().GunDropNotifyDiedConnections) do
+            pcall(function() c:Disconnect() end)
+        end
+    end
+    getgenv().GunDropNotifyDiedConnections = {}
+end
+
+-- ============================================================
 -- AUTO GRAB GUN
 -- ============================================================
 local function StartAutoGrab()
@@ -2183,7 +2284,7 @@ local function StopAutoGrab()
 end
 
 -- ============================================================
--- TRIGGERBOT  (8x Leaks targeting)
+-- TRIGGERBOT
 -- ============================================================
 local function StartTriggerbot()
     getgenv().TriggerbotActive = true
@@ -2257,12 +2358,7 @@ local function StopTriggerbot()
 end
 
 -- ============================================================
--- SILENT AIM  (toggle, first-person aware)
---   - Detects FP via camera/head proximity
---   - FP: uses camera as ray origin, aims at Head
---   - TP: uses gun's GunServer attachment, aims at UpperTorso
---   - Filters camera + viewmodel out of the verification ray
---   - Lenient fallback in FP so viewmodel parts don't block
+-- SILENT AIM  (toggle, first-person aware, STRICT wall check)
 -- ============================================================
 getgenv().SilentAimActive = false
 silentAimConnection = nil
@@ -2381,16 +2477,13 @@ local function fireSilentAim()
     rayParams.IgnoreWater = true
 
     local dir = (aimPos - originCF.Position)
+    if dir.Magnitude < 0.01 then return end
+
     local result = workspace:Raycast(originCF.Position, dir.Unit * 1000, rayParams)
 
-    local canFire = false
-    if result and result.Instance:IsDescendantOf(bestTarget.Character) then
-        canFire = true
-    elseif isFirstPerson() and bestDist < 200 then
-        canFire = true
+    if not result or not result.Instance:IsDescendantOf(bestTarget.Character) then
+        return
     end
-
-    if not canFire then return end
 
     local shootRemote = gun:FindFirstChild("Shoot") or gun:FindFirstChild("Fire")
     if not shootRemote then return end
@@ -2406,7 +2499,7 @@ local function StartSilentAimLoop()
     if silentAimConnection then silentAimConnection:Disconnect() end
     silentAimConnection = RunService.RenderStepped:Connect(function()
         if not getgenv().SilentAimActive then return end
-        local rate = isFirstPerson() and 0.05 or 0.1
+        local rate = isFirstPerson() and 0.06 or 0.1
         if tick() - (getgenv()._lastSilentShot or 0) < rate then return end
         getgenv()._lastSilentShot = tick()
         pcall(fireSilentAim)
@@ -2714,6 +2807,15 @@ UtilityPanel.CreateToggle("Anti Fling", false, function(s)
     if s then StartAntiFling() else StopAntiFling() end
 end)
 
+UtilityPanel.CreateSection("notifications")
+UtilityPanel.CreateToggle("Gun Drop Notify", true, function(s)
+    getgenv().GunDropNotifyEnabled = s
+    if s then StartGunDropNotify() else StopGunDropNotify() end
+end)
+-- Default ON — start listener immediately
+getgenv().GunDropNotifyEnabled = true
+StartGunDropNotify()
+
 -- ============================================================
 -- PANEL 3 — COMBAT
 -- ============================================================
@@ -2738,7 +2840,7 @@ triggerbotToggleRef = CombatPanel.CreateToggle("Triggerbot", false, function(s)
     end
 end)
 
-silentAimToggleRef = CombatPanel.CreateToggle("Silent Aim (FP-ready)", false, function(s)
+silentAimToggleRef = CombatPanel.CreateToggle("Silent Aim (wall-safe)", false, function(s)
     if s then
         if getgenv().TriggerbotActive then
             if triggerbotToggleRef then
@@ -2760,43 +2862,6 @@ end)
 CombatPanel.CreateDropdown("KNIFE AURA RANGE", 15,
     {8, 10, 12, 15, 18, 20, 25, 30}, function(v)
     knifeAuraRange = tonumber(v) or knifeAuraRange
-end)
-
-CombatPanel.CreateToggle("Auto Throw Knife", false, function(s)
-    autoThrowEnabled = s
-    if s then startAutoThrow() else stopAutoThrow() end
-end)
-CombatPanel.CreateDropdown("AUTO THROW RANGE", 100,
-    {50, 75, 100, 150, 200, 300}, function(v)
-    autoThrowRange = tonumber(v) or autoThrowRange
-end)
-
-CombatPanel.CreateToggle("Silent Knife", false, function(s)
-    if s then startSilentKnife() else stopSilentKnife() end
-end)
-CombatPanel.CreateDropdown("SILENT KNIFE RATE", 0.15,
-    {0.05, 0.1, 0.15, 0.2, 0.3, 0.5}, function(v)
-    silentKnifeRate = tonumber(v) or silentKnifeRate
-end)
-
-CombatPanel.CreateSection("kill aura")
-CombatPanel.CreateToggle("Kill Aura", false, function(s)
-    killAuraEnabled = s
-    if s then startKillAura() else stopKillAura() end
-end)
-CombatPanel.CreateDropdown("AURA RANGE", 15,
-    {8, 10, 12, 15, 18, 20, 25, 30}, function(v)
-    killAuraRange = tonumber(v) or killAuraRange
-end)
-
-CombatPanel.CreateSection("fast throw")
-CombatPanel.CreateToggle("Fast Throw", false, function(s)
-    fastThrowEnabled = s
-    if s then StartFastThrow() else StopFastThrow() end
-end)
-CombatPanel.CreateDropdown("THROW SPEED", 0.05,
-    {0.01, 0.02, 0.03, 0.05, 0.08, 0.1, 0.15}, function(v)
-    fastThrowDelay = tonumber(v) or fastThrowDelay
 end)
 
 CombatPanel.CreateSection("fling")
