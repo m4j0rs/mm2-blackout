@@ -14,10 +14,11 @@ local Workspace          = game:GetService("Workspace")
 local Lighting           = game:GetService("Lighting")
 local LocalPlayer        = Players.LocalPlayer
 
-local Remotes = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Gameplay")
+local Remotes            = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Gameplay")
 local FadeEvent          = Remotes:WaitForChild("Fade")
 local DataChangedEvent   = Remotes:WaitForChild("PlayerDataChanged")
 local RoundEndEvent      = Remotes:WaitForChild("RoundEndFade")
+local RoundStartEvent    = Remotes:WaitForChild("TeleportToPart")
 
 -- ============================================================
 -- THEME
@@ -55,48 +56,25 @@ local RoleColors = {
 }
 
 -- ============================================================
--- ROLE DATA HELPER
+-- ROLE DATA LOOKUP
 -- ============================================================
 local function GetRoleFromData(plr)
     local roles = getgenv().BlackoutRoles or {}
     for id, data in pairs(roles) do
-        local matches =
-            (tostring(id) == tostring(plr.UserId)) or
-            (id == plr.Name) or
-            (id == plr.DisplayName)
-        if matches then
-            if typeof(data) == "table" then
+        if data and typeof(data) == "table" then
+            if tostring(id) == tostring(plr.UserId) or id == plr.Name then
                 return data.Role
-            elseif typeof(data) == "string" then
-                return data
-            end
-        end
-    end
-    for key, val in pairs(roles) do
-        if typeof(key) == "string" and typeof(val) == "string" then
-            if val == plr.Name or val == plr.DisplayName then
-                return key
-            end
-        end
-    end
-    for key, val in pairs(roles) do
-        if typeof(key) == "string" then
-            if typeof(val) == "number" and val == plr.UserId then
-                return key
-            elseif typeof(val) == "userdata" and val == plr then
-                return key
             end
         end
     end
     return nil
 end
 
--- ============================================================
--- GetRoleColor — TOOL HOLDER ONLY (no role data fallback for Sheriff)
--- This makes blue follow whoever holds the gun RIGHT NOW.
--- Murderer is only red if they currently hold the knife.
--- ============================================================
 local function GetRoleColor(player)
+    local serverRole = GetRoleFromData(player)
+    if serverRole and RoleColors[serverRole] then
+        return RoleColors[serverRole]
+    end
     local function hasTool(name)
         local bp = player:FindFirstChild("Backpack")
         local ch = player.Character
@@ -106,7 +84,6 @@ local function GetRoleColor(player)
     end
     if hasTool("Knife") then return RoleColors.Murderer end
     if hasTool("Gun")   then return RoleColors.Sheriff  end
-    -- No tool = not the current murderer or sheriff. Show as innocent.
     return RoleColors.Innocent
 end
 
@@ -125,13 +102,21 @@ local nameESPEnabled = true
 local aimbotEnabled = false
 local aimbotSmoothing = 0.2
 local aimbotFOV = 150
-local aimbotPart = "Head"
+local aimbotPart = "UpperTorso"
 local aimbotKey = "Right Click"
 local aimbotTarget = "Murderer"
 local aiming = false
 
 local killAuraEnabled = false
 local killAuraRange = 15
+
+-- KNIFE SCRIPT STATE
+local knifeAuraEnabled = false
+local knifeAuraRange = 15
+local autoThrowEnabled = false
+local autoThrowRange = 100
+local silentKnifeEnabled = false
+local silentKnifeRate = 0.15
 
 local fastThrowEnabled = false
 local fastThrowConnection = nil
@@ -144,9 +129,9 @@ local coinFarmConnection = nil
 local coinFarmSpeed = 1
 local coinFarmWarmup = 0.25
 
-local silentAimLoop = nil
 local silentAimToggleRef = nil
 local triggerbotToggleRef = nil
+local silentAimConnection = nil
 
 local antiFlingEnabled = false
 local antiFlingConnections = {}
@@ -999,13 +984,23 @@ local function StartRoleTracking()
     end
     getgenv().BlackoutRoleConnections = {}
 
-    table.insert(getgenv().BlackoutRoleConnections, FadeEvent.OnClientEvent:Connect(function(d)
-        if typeof(d) == "table" then getgenv().BlackoutRoles = d end
+    table.insert(getgenv().BlackoutRoleConnections, FadeEvent.OnClientEvent:Connect(function(data)
+        if typeof(data) == "table" then
+            getgenv().BlackoutRoles = data
+        end
     end))
-    table.insert(getgenv().BlackoutRoleConnections, DataChangedEvent.OnClientEvent:Connect(function(d)
-        if typeof(d) == "table" then getgenv().BlackoutRoles = d end
+
+    table.insert(getgenv().BlackoutRoleConnections, DataChangedEvent.OnClientEvent:Connect(function(data)
+        if typeof(data) == "table" then
+            getgenv().BlackoutRoles = data
+        end
     end))
+
     table.insert(getgenv().BlackoutRoleConnections, RoundEndEvent.OnClientEvent:Connect(function()
+        getgenv().BlackoutRoles = {}
+    end))
+
+    table.insert(getgenv().BlackoutRoleConnections, RoundStartEvent.OnClientEvent:Connect(function()
         getgenv().BlackoutRoles = {}
     end))
 end
@@ -1556,11 +1551,14 @@ local function getClosestPlayerInFOV()
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
             if hum and hum.Health > 0 then
                 if aimbotTarget == "Murderer" then
+                    local serverRole = GetRoleFromData(plr)
                     local hasKnife = plr.Character:FindFirstChild("Knife") or
                         (plr.Backpack and plr.Backpack:FindFirstChild("Knife"))
-                    if not hasKnife then continue end
+                    if serverRole ~= "Murderer" and not hasKnife then continue end
                 end
                 local part = plr.Character:FindFirstChild(aimbotPart)
+                    or plr.Character:FindFirstChild("UpperTorso")
+                    or plr.Character:FindFirstChild("Torso")
                     or plr.Character:FindFirstChild("HumanoidRootPart")
                 if part then
                     local sp, onScreen = cam:WorldToViewportPoint(part.Position)
@@ -1648,6 +1646,159 @@ local function stopKillAura()
 end
 
 -- ============================================================
+-- KNIFE AURA
+-- ============================================================
+local knifeAuraConnection = nil
+
+local function startKnifeAura()
+    if knifeAuraConnection then knifeAuraConnection:Disconnect() end
+    knifeAuraConnection = RunService.RenderStepped:Connect(function()
+        if not knifeAuraEnabled then return end
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local tool = char:FindFirstChildOfClass("Tool")
+        if not hrp or not tool then return end
+        if tool.Name ~= "Knife" then return end
+
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                local targetHRP = plr.Character:FindFirstChild("HumanoidRootPart")
+                if targetHRP and (targetHRP.Position - hrp.Position).Magnitude <= knifeAuraRange then
+                    pcall(function() tool:Activate() end)
+                end
+            end
+        end
+    end)
+end
+
+local function stopKnifeAura()
+    if knifeAuraConnection then
+        knifeAuraConnection:Disconnect()
+        knifeAuraConnection = nil
+    end
+end
+
+-- ============================================================
+-- AUTO THROW KNIFE
+-- ============================================================
+local autoThrowConnection = nil
+
+local function startAutoThrow()
+    if autoThrowConnection then autoThrowConnection:Disconnect() end
+    autoThrowConnection = RunService.RenderStepped:Connect(function()
+        if not autoThrowEnabled then return end
+        local char = LocalPlayer.Character
+        if not char then return end
+        local tool = char:FindFirstChildOfClass("Tool")
+        if not tool or tool.Name ~= "Knife" then return end
+
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+
+        local nearest, nearestDist = nil, autoThrowRange
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                local targetHRP = plr.Character:FindFirstChild("HumanoidRootPart")
+                if targetHRP then
+                    local d = (targetHRP.Position - hrp.Position).Magnitude
+                    if d < nearestDist then
+                        nearestDist = d
+                        nearest = targetHRP
+                    end
+                end
+            end
+        end
+
+        if nearest then
+            pcall(function() tool:Activate() end)
+        end
+    end)
+end
+
+local function stopAutoThrow()
+    if autoThrowConnection then
+        autoThrowConnection:Disconnect()
+        autoThrowConnection = nil
+    end
+end
+
+-- ============================================================
+-- SILENT KNIFE
+-- ============================================================
+local silentKnifeConnection = nil
+
+local function findKnifeTarget()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+
+    local best, bestDist = nil, math.huge
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local targetHRP = plr.Character:FindFirstChild("HumanoidRootPart")
+                if targetHRP then
+                    local d = (targetHRP.Position - hrp.Position).Magnitude
+                    if d < bestDist then
+                        bestDist = d
+                        best = { plr = plr, hrp = targetHRP }
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function fireSilentKnife()
+    if not silentKnifeEnabled then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local knife = char:FindFirstChild("Knife")
+    if not knife then return end
+
+    local target = findKnifeTarget()
+    if not target then return end
+
+    local throwRemote = knife:FindFirstChild("Throw")
+        or knife:FindFirstChild("Fire")
+        or knife:FindFirstChild("Shoot")
+
+    if throwRemote then
+        pcall(function()
+            throwRemote:FireServer(
+                CFrame.new(char.HumanoidRootPart.Position, target.hrp.Position),
+                CFrame.new(target.hrp.Position)
+            )
+        end)
+    else
+        pcall(function() knife:Activate() end)
+    end
+end
+
+local function startSilentKnife()
+    silentKnifeEnabled = true
+    if silentKnifeConnection then silentKnifeConnection:Disconnect() end
+    silentKnifeConnection = RunService.RenderStepped:Connect(function()
+        if not silentKnifeEnabled then return end
+        if tick() - (getgenv()._lastSilentKnife or 0) < silentKnifeRate then return end
+        getgenv()._lastSilentKnife = tick()
+        pcall(fireSilentKnife)
+    end)
+end
+
+local function stopSilentKnife()
+    silentKnifeEnabled = false
+    if silentKnifeConnection then
+        silentKnifeConnection:Disconnect()
+        silentKnifeConnection = nil
+    end
+end
+
+-- ============================================================
 -- FAST THROW
 -- ============================================================
 local function StartFastThrow()
@@ -1727,7 +1878,7 @@ local function StopAntiFling()
 end
 
 -- ============================================================
--- FLING — WeAreDevs spin + TP onto target
+-- FLING
 -- ============================================================
 local flinging = false
 local flingTargetPlayer = nil
@@ -1857,6 +2008,12 @@ end
 
 local function GetMurderer()
     for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local serverRole = GetRoleFromData(plr)
+            if serverRole == "Murderer" then return plr end
+        end
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer and plr.Character then
             local hasKnife = plr.Character:FindFirstChild("Knife") or
                 (plr.Backpack and plr.Backpack:FindFirstChild("Knife"))
@@ -1867,6 +2024,12 @@ local function GetMurderer()
 end
 
 local function GetSheriff()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local serverRole = GetRoleFromData(plr)
+            if serverRole == "Sheriff" then return plr end
+        end
+    end
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer and plr.Character then
             local hasGun = plr.Character:FindFirstChild("Gun") or
@@ -2020,7 +2183,7 @@ local function StopAutoGrab()
 end
 
 -- ============================================================
--- TRIGGERBOT / SILENT AIM
+-- TRIGGERBOT  (8x Leaks targeting)
 -- ============================================================
 local function StartTriggerbot()
     getgenv().TriggerbotActive = true
@@ -2028,47 +2191,62 @@ local function StartTriggerbot()
         while getgenv().TriggerbotActive do
             local char = LocalPlayer.Character
             if not char then task.wait() continue end
+
             local gun = char:FindFirstChild("Gun") or char:FindFirstChild("Revolver")
             if not gun then task.wait() continue end
+
             local originCF
-            local gs = gun:FindFirstChild("GunServer")
-            if gs then
-                local att = gs:FindFirstChild("GunRaycastAttachment1") or gs:FindFirstChild("RaycastAttachment")
-                if att then originCF = att.WorldCFrame end
+            local gunServer = gun:FindFirstChild("GunServer")
+            if gunServer then
+                local attachment = gunServer:FindFirstChild("GunRaycastAttachment1")
+                    or gunServer:FindFirstChild("RaycastAttachment")
+                if attachment then originCF = attachment.WorldCFrame end
             end
             if not originCF then
-                local h = gun:FindFirstChild("Handle") or gun:FindFirstChild("Gun")
-                if h and h:IsA("BasePart") then originCF = h.CFrame end
+                local handle = gun:FindFirstChild("Handle") or gun:FindFirstChild("Gun")
+                if handle and handle:IsA("BasePart") then originCF = handle.CFrame end
             end
             if not originCF then
                 local hrp = char:FindFirstChild("HumanoidRootPart")
                 if not hrp then task.wait() continue end
                 originCF = hrp.CFrame
             end
+
             local mouse = LocalPlayer:GetMouse()
             local target = mouse.Target
             if not target then task.wait() continue end
+
             local targetModel = target:FindFirstAncestorOfClass("Model")
             if not targetModel then task.wait() continue end
+
             local targetPlayer = Players:GetPlayerFromCharacter(targetModel)
             if not targetPlayer or targetPlayer == LocalPlayer then task.wait() continue end
-            local hasKnife = targetModel:FindFirstChild("Knife") or
-                (targetPlayer.Backpack and targetPlayer.Backpack:FindFirstChild("Knife"))
+
+            local hasKnife = targetModel:FindFirstChild("Knife")
+                or (targetPlayer.Backpack and targetPlayer.Backpack:FindFirstChild("Knife"))
             if not hasKnife then task.wait() continue end
+
             local targetHRP = targetModel:FindFirstChild("HumanoidRootPart")
             if not targetHRP then task.wait() continue end
-            local rp = RaycastParams.new()
-            rp.FilterType = Enum.RaycastFilterType.Exclude
-            rp.FilterDescendantsInstances = {char}
-            local dir = (targetHRP.Position - originCF.Position).Unit * 1000
-            local res = workspace:Raycast(originCF.Position, dir, rp)
-            if not res or not res.Instance:IsDescendantOf(targetModel) then task.wait() continue end
-            local remote = gun:FindFirstChild("Shoot") or gun:FindFirstChild("Fire")
-            if not remote then task.wait() continue end
-            remote:FireServer(
+
+            local rayParams = RaycastParams.new()
+            rayParams.FilterType = Enum.RaycastFilterType.Exclude
+            rayParams.FilterDescendantsInstances = { char }
+
+            local direction = (targetHRP.Position - originCF.Position).Unit * 1000
+            local result = workspace:Raycast(originCF.Position, direction, rayParams)
+            if not result or not result.Instance:IsDescendantOf(targetModel) then
+                task.wait() continue
+            end
+
+            local shootRemote = gun:FindFirstChild("Shoot") or gun:FindFirstChild("Fire")
+            if not shootRemote then task.wait() continue end
+
+            shootRemote:FireServer(
                 CFrame.new(originCF.Position, targetHRP.Position),
                 CFrame.new(targetHRP.Position)
             )
+
             task.wait(0.05)
         end
     end)
@@ -2078,18 +2256,48 @@ local function StopTriggerbot()
     getgenv().TriggerbotActive = false
 end
 
+-- ============================================================
+-- SILENT AIM  (toggle, first-person aware)
+--   - Detects FP via camera/head proximity
+--   - FP: uses camera as ray origin, aims at Head
+--   - TP: uses gun's GunServer attachment, aims at UpperTorso
+--   - Filters camera + viewmodel out of the verification ray
+--   - Lenient fallback in FP so viewmodel parts don't block
+-- ============================================================
 getgenv().SilentAimActive = false
+silentAimConnection = nil
 
-local function FireSilentAim()
+local function isFirstPerson()
+    local cam = workspace.CurrentCamera
     local char = LocalPlayer.Character
-    if not char then return end
-    local gun = char:FindFirstChild("Gun")
-    if not gun then return end
+    if not cam or not char then return false end
+    local head = char:FindFirstChild("Head")
+    if not head then return false end
+    return (cam.CFrame.Position - head.Position).Magnitude < 2
+end
+
+local function getGunForSilent()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    return char:FindFirstChild("Gun") or char:FindFirstChild("Revolver")
+end
+
+local function getSilentOrigin(gun)
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local cam = workspace.CurrentCamera
+
+    if isFirstPerson() and cam then
+        return cam.CFrame
+    end
+
     local originCF
     local gunServer = gun:FindFirstChild("GunServer")
     if gunServer then
-        local att = gunServer:FindFirstChild("GunRaycastAttachment1") or gunServer:FindFirstChild("RaycastAttachment")
-        if att then originCF = att.WorldCFrame end
+        local attachment = gunServer:FindFirstChild("GunRaycastAttachment1")
+            or gunServer:FindFirstChild("RaycastAttachment")
+            or gunServer:FindFirstChildWhichIsA("Attachment", true)
+        if attachment then originCF = attachment.WorldCFrame end
     end
     if not originCF then
         local handle = gun:FindFirstChild("Handle") or gun:FindFirstChild("Gun")
@@ -2097,32 +2305,119 @@ local function FireSilentAim()
     end
     if not originCF then
         local hrp = char:FindFirstChild("HumanoidRootPart")
-        if not hrp then return end
-        originCF = hrp.CFrame
+        if hrp then originCF = hrp.CFrame end
     end
-    local targetPlayer, targetHRP
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character then
-            local hasKnife = plr.Character:FindFirstChild("Knife") or
-                (plr.Backpack and plr.Backpack:FindFirstChild("Knife"))
-            if hasKnife then
-                local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
-                if hrp then targetPlayer = plr; targetHRP = hrp; break end
+    return originCF
+end
+
+local function getAimPart(targetChar)
+    if isFirstPerson() then
+        return targetChar:FindFirstChild("Head")
+            or targetChar:FindFirstChild("UpperTorso")
+            or targetChar:FindFirstChild("Torso")
+            or targetChar:FindFirstChild("HumanoidRootPart")
+    end
+    return targetChar:FindFirstChild("UpperTorso")
+        or targetChar:FindFirstChild("Torso")
+        or targetChar:FindFirstChild("HumanoidRootPart")
+        or targetChar:FindFirstChild("Head")
+end
+
+local function buildSilentRayFilter()
+    local filter = {}
+    local char = LocalPlayer.Character
+    if char then table.insert(filter, char) end
+
+    local cam = workspace.CurrentCamera
+    if cam then
+        table.insert(filter, cam)
+        for _, child in ipairs(cam:GetChildren()) do
+            table.insert(filter, child)
+        end
+    end
+
+    return filter
+end
+
+local function fireSilentAim()
+    if not getgenv().SilentAimActive then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    local gun = getGunForSilent()
+    if not gun then return end
+
+    local originCF = getSilentOrigin(gun)
+    if not originCF then return end
+
+    local bestTarget, bestPart, bestDist = nil, nil, math.huge
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local hum = player.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local hasKnife = player.Character:FindFirstChild("Knife")
+                    or (player.Backpack and player.Backpack:FindFirstChild("Knife"))
+                if hasKnife then
+                    local part = getAimPart(player.Character)
+                    if part then
+                        local d = (part.Position - originCF.Position).Magnitude
+                        if d < bestDist then
+                            bestDist = d
+                            bestTarget = player
+                            bestPart = part
+                        end
+                    end
+                end
             end
         end
     end
-    if not targetPlayer then return end
-    local rp = RaycastParams.new()
-    rp.FilterType = Enum.RaycastFilterType.Exclude
-    rp.FilterDescendantsInstances = {char}
-    local res = workspace:Raycast(originCF.Position, (targetHRP.Position - originCF.Position).Unit * 1000, rp)
-    if not res or not res.Instance:IsDescendantOf(targetPlayer.Character) then return end
+    if not bestTarget then return end
+
+    local aimPos = bestPart.Position
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = buildSilentRayFilter()
+    rayParams.IgnoreWater = true
+
+    local dir = (aimPos - originCF.Position)
+    local result = workspace:Raycast(originCF.Position, dir.Unit * 1000, rayParams)
+
+    local canFire = false
+    if result and result.Instance:IsDescendantOf(bestTarget.Character) then
+        canFire = true
+    elseif isFirstPerson() and bestDist < 200 then
+        canFire = true
+    end
+
+    if not canFire then return end
+
     local shootRemote = gun:FindFirstChild("Shoot") or gun:FindFirstChild("Fire")
-    if shootRemote then
-        shootRemote:FireServer(
-            CFrame.new(originCF.Position, targetHRP.Position),
-            CFrame.new(targetHRP.Position)
-        )
+    if not shootRemote then return end
+
+    shootRemote:FireServer(
+        CFrame.new(originCF.Position, aimPos),
+        CFrame.new(aimPos)
+    )
+end
+
+local function StartSilentAimLoop()
+    getgenv().SilentAimActive = true
+    if silentAimConnection then silentAimConnection:Disconnect() end
+    silentAimConnection = RunService.RenderStepped:Connect(function()
+        if not getgenv().SilentAimActive then return end
+        local rate = isFirstPerson() and 0.05 or 0.1
+        if tick() - (getgenv()._lastSilentShot or 0) < rate then return end
+        getgenv()._lastSilentShot = tick()
+        pcall(fireSilentAim)
+    end)
+end
+
+local function StopSilentAimLoop()
+    getgenv().SilentAimActive = false
+    if silentAimConnection then
+        silentAimConnection:Disconnect()
+        silentAimConnection = nil
     end
 end
 
@@ -2206,7 +2501,6 @@ local function StopPerfMode()
     end
 end
 
--- TP in front of target, facing them
 local function TpToRandomPlayer()
     local char = LocalPlayer.Character
     if not char then return end
@@ -2320,28 +2614,6 @@ local function StopAutoBarriers()
     if getgenv().BarrierAutoConn then
         getgenv().BarrierAutoConn:Disconnect()
         getgenv().BarrierAutoConn = nil
-    end
-end
-
--- ============================================================
--- SILENT AIM LOOP CONTROL
--- ============================================================
-local function StartSilentAimLoop()
-    if silentAimLoop then task.cancel(silentAimLoop) end
-    silentAimLoop = task.spawn(function()
-        while getgenv().SilentAimActive do
-            pcall(FireSilentAim)
-            task.wait(0.15)
-        end
-        silentAimLoop = nil
-    end)
-end
-
-local function StopSilentAimLoop()
-    getgenv().SilentAimActive = false
-    if silentAimLoop then
-        task.cancel(silentAimLoop)
-        silentAimLoop = nil
     end
 end
 
@@ -2466,7 +2738,7 @@ triggerbotToggleRef = CombatPanel.CreateToggle("Triggerbot", false, function(s)
     end
 end)
 
-silentAimToggleRef = CombatPanel.CreateToggle("Silent Aim", false, function(s)
+silentAimToggleRef = CombatPanel.CreateToggle("Silent Aim (FP-ready)", false, function(s)
     if s then
         if getgenv().TriggerbotActive then
             if triggerbotToggleRef then
@@ -2474,13 +2746,40 @@ silentAimToggleRef = CombatPanel.CreateToggle("Silent Aim", false, function(s)
             end
             StopTriggerbot()
         end
-        getgenv().SilentAimActive = true
         StartSilentAimLoop()
     else
         StopSilentAimLoop()
     end
 end)
 
+CombatPanel.CreateSection("knife")
+CombatPanel.CreateToggle("Knife Aura", false, function(s)
+    knifeAuraEnabled = s
+    if s then startKnifeAura() else stopKnifeAura() end
+end)
+CombatPanel.CreateDropdown("KNIFE AURA RANGE", 15,
+    {8, 10, 12, 15, 18, 20, 25, 30}, function(v)
+    knifeAuraRange = tonumber(v) or knifeAuraRange
+end)
+
+CombatPanel.CreateToggle("Auto Throw Knife", false, function(s)
+    autoThrowEnabled = s
+    if s then startAutoThrow() else stopAutoThrow() end
+end)
+CombatPanel.CreateDropdown("AUTO THROW RANGE", 100,
+    {50, 75, 100, 150, 200, 300}, function(v)
+    autoThrowRange = tonumber(v) or autoThrowRange
+end)
+
+CombatPanel.CreateToggle("Silent Knife", false, function(s)
+    if s then startSilentKnife() else stopSilentKnife() end
+end)
+CombatPanel.CreateDropdown("SILENT KNIFE RATE", 0.15,
+    {0.05, 0.1, 0.15, 0.2, 0.3, 0.5}, function(v)
+    silentKnifeRate = tonumber(v) or silentKnifeRate
+end)
+
+CombatPanel.CreateSection("kill aura")
 CombatPanel.CreateToggle("Kill Aura", false, function(s)
     killAuraEnabled = s
     if s then startKillAura() else stopKillAura() end
@@ -2504,7 +2803,6 @@ CombatPanel.CreateSection("fling")
 CombatPanel.CreateInput("FLING TARGET", "username", function(v)
     flingTargetName = v
 end, function(v)
-    -- On Enter: fling immediately
     FlingByName(v)
 end)
 CombatPanel.CreateButton("Fling Target", function()
@@ -2530,8 +2828,8 @@ CombatPanel.CreateDropdown("AIM KEY", "Right Click",
     aimbotKey = v
     aiming = false
 end)
-CombatPanel.CreateDropdown("AIM PART", "Head",
-    {"Head", "UpperTorso", "HumanoidRootPart"}, function(v)
+CombatPanel.CreateDropdown("AIM PART", "UpperTorso",
+    {"UpperTorso", "Torso", "HumanoidRootPart", "Head"}, function(v)
     aimbotPart = v
 end)
 CombatPanel.CreateDropdown("AIM TARGET", "Murderer",
