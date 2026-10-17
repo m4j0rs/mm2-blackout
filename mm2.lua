@@ -70,7 +70,13 @@ local RoleColors = {
     Murderer = Color3.fromRGB(255, 45, 65),
     Sheriff  = Color3.fromRGB(65, 130, 255),
     Innocent = Color3.fromRGB(65, 220, 125),
+    Dead     = Color3.fromRGB(130, 130, 140),
 }
+
+-- ============================================================
+-- PER-ROUND DEATH MEMORY
+-- ============================================================
+getgenv().BlackoutDiedThisRound = getgenv().BlackoutDiedThisRound or {}
 
 -- ============================================================
 -- ROLE DATA LOOKUP
@@ -88,6 +94,16 @@ local function GetRoleFromData(plr)
 end
 
 local function GetRoleColor(player)
+    if getgenv().BlackoutDiedThisRound and getgenv().BlackoutDiedThisRound[player.UserId] then
+        return RoleColors.Dead
+    end
+
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then
+        return RoleColors.Dead
+    end
+
     local function hasTool(name)
         local bp = player:FindFirstChild("Backpack")
         local ch = player.Character
@@ -128,6 +144,11 @@ local function isHoldingGun(plr)
     return false
 end
 
+local function isMurderer(plr)
+    if GetRoleFromData(plr) == "Murderer" then return true end
+    return isHoldingKnife(plr)
+end
+
 local function findNearestPlayer()
     local lp = LocalPlayer
     local lpChar = lp.Character
@@ -155,6 +176,14 @@ end
 
 local function findMurderer()
     for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local role = GetRoleFromData(plr)
+            if role == "Murderer" then
+                return plr
+            end
+        end
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer and isHoldingKnife(plr) then
             return plr
         end
@@ -163,6 +192,14 @@ local function findMurderer()
 end
 
 local function findSheriff()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local role = GetRoleFromData(plr)
+            if role == "Sheriff" then
+                return plr
+            end
+        end
+    end
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer and isHoldingGun(plr) then
             return plr
@@ -182,8 +219,8 @@ local tracerEnabled = false
 local tracerOrigin = "Bottom"
 local healthBarEnabled = false
 local nameESPEnabled = true
-local selfESPEnabled = true         -- NEW: show own role ESP
-local murderPointerEnabled = true   -- NEW: on-screen arrow to murderer
+local selfESPEnabled = true
+local murderPointerEnabled = true
 
 local aimbotEnabled = false
 local aimbotSmoothing = 0.2
@@ -192,6 +229,8 @@ local aimbotPart = "UpperTorso"
 local aimbotKey = "Right Click"
 local aimbotTarget = "Murderer"
 local aiming = false
+local aimbotPrediction = false
+local aimbotPredictionFactor = 0.135
 
 local knifeAuraEnabled = false
 local knifeAuraRange = 15
@@ -348,9 +387,7 @@ local function ShowNotification(title, body, opts)
 end
 
 -- ============================================================
--- MURDERER SCREEN POINTER (edge arrow + distance)
---   Only appears when the murderer is OFF-SCREEN. When you're
---   looking at them, nothing renders.
+-- MURDERER SCREEN POINTER
 -- ============================================================
 local MurderPointerGui = Instance.new("ScreenGui")
 MurderPointerGui.Name = "BlackoutMurderPointer"
@@ -417,7 +454,6 @@ local function updateMurderPointer()
     local worldPos = mHRP.Position
     local screenPos, onScreen = cam:WorldToViewportPoint(worldPos)
 
-    -- IMPORTANT: only draw when target is NOT on screen
     if screenPos.Z > 0 and onScreen then
         pointerArrow.Visible = false
         pointerDistance.Visible = false
@@ -428,7 +464,6 @@ local function updateMurderPointer()
     local lpHRP = lpChar and lpChar:FindFirstChild("HumanoidRootPart")
     local distance = lpHRP and (worldPos - lpHRP.Position).Magnitude or 0
 
-    -- Off-screen: clamp to viewport edge, point towards target
     local viewport = cam.ViewportSize
     local camCF = cam.CFrame
     local dir = (worldPos - camCF.Position)
@@ -1363,13 +1398,41 @@ local function StartRoleTracking()
 
     table.insert(getgenv().BlackoutRoleConnections, RoundEndEvent.OnClientEvent:Connect(function()
         getgenv().BlackoutRoles = {}
+        getgenv().BlackoutDiedThisRound = {}
     end))
 
     table.insert(getgenv().BlackoutRoleConnections, RoundStartEvent.OnClientEvent:Connect(function()
         getgenv().BlackoutRoles = {}
+        getgenv().BlackoutDiedThisRound = {}
     end))
 end
 StartRoleTracking()
+
+-- ============================================================
+-- DEATH TRACKING (per-round)
+-- ============================================================
+local function WatchDeaths(plr)
+    if plr.Character then
+        local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.Died:Connect(function()
+                getgenv().BlackoutDiedThisRound[plr.UserId] = true
+            end)
+        end
+    end
+    plr.CharacterAdded:Connect(function(char)
+        task.wait(0.3)
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.Died:Connect(function()
+                getgenv().BlackoutDiedThisRound[plr.UserId] = true
+            end)
+        end
+    end)
+end
+
+for _, plr in ipairs(Players:GetPlayers()) do WatchDeaths(plr) end
+Players.PlayerAdded:Connect(WatchDeaths)
 
 -- ============================================================
 -- OUTLINE ESP
@@ -1386,7 +1449,6 @@ local function StartOutlineESP()
     end
 
     local function CreateESP(plr)
-        -- Self ESP toggle: if off and it's me, skip
         if plr == LocalPlayer and not selfESPEnabled then return end
         if not plr.Character then return end
         if getgenv().PlayerOutlineObjects[plr] then getgenv().PlayerOutlineObjects[plr]:Destroy() end
@@ -1431,7 +1493,6 @@ local function StartOutlineESP()
                         UpdateColor(plr, getgenv().PlayerOutlineObjects[plr])
                     end
                 else
-                    -- Self ESP got turned off while we had our own highlight
                     if getgenv().PlayerOutlineObjects[plr] then
                         getgenv().PlayerOutlineObjects[plr]:Destroy()
                         getgenv().PlayerOutlineObjects[plr] = nil
@@ -1460,7 +1521,6 @@ local function StopOutlineESP()
         getgenv().PlayerOutlineObjects = {}
     end
 end
-
 -- ============================================================
 -- BOX ESP
 -- ============================================================
@@ -1535,7 +1595,7 @@ local function updateBoxESP()
         elseif plr.Character then
             local char = plr.Character
             local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health > 0 then
+            if hum then
                 local corners = getCharacterCorners(char)
                 if corners then
                     local cam = workspace.CurrentCamera
@@ -1552,7 +1612,8 @@ local function updateBoxESP()
                             if sp.Y > maxY then maxY = sp.Y end
                         end
                     end
-                    if anyVisible and minX < maxX and minY < maxY then                        local pad = 2
+                    if anyVisible and minX < maxX and minY < maxY then
+                        local pad = 2
                         d.box.Size = Vector2.new((maxX - minX) + pad * 2, (maxY - minY) + pad * 2)
                         d.box.Position = Vector2.new(minX - pad, minY - pad)
                         d.box.Color = GetRoleColor(plr)
@@ -1754,7 +1815,7 @@ local function updateSkeletonESP()
         elseif plr.Character then
             local char = plr.Character
             local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health > 0 then
+            if hum then
                 if not d.bones or d.bonesChar ~= char then
                     d.bones = resolveBones(char)
                     d.bonesChar = char
@@ -1825,7 +1886,7 @@ local function updateTracerESP()
             local char = plr.Character
             local hum = char:FindFirstChildOfClass("Humanoid")
             local hrp = char:FindFirstChild("HumanoidRootPart")
-            if hum and hum.Health > 0 and hrp then
+            if hum and hrp then
                 local screenPos, onScreen = cam:WorldToViewportPoint(hrp.Position)
                 if onScreen and screenPos.Z > 0 then
                     local origin
@@ -1915,7 +1976,7 @@ Players.PlayerAdded:Connect(createNameESP)
 Players.PlayerRemoving:Connect(removeNameESP)
 
 -- ============================================================
--- AIMBOT
+-- AIMBOT (with prediction option)
 -- ============================================================
 local function getClosestPlayerInFOV()
     local cam = workspace.CurrentCamera
@@ -1927,7 +1988,7 @@ local function getClosestPlayerInFOV()
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
             if hum and hum.Health > 0 then
                 if aimbotTarget == "Murderer" then
-                    if not isHoldingKnife(plr) then continue end
+                    if not isMurderer(plr) then continue end
                 end
                 local part = plr.Character:FindFirstChild(aimbotPart)
                     or plr.Character:FindFirstChild("UpperTorso")
@@ -1940,7 +2001,7 @@ local function getClosestPlayerInFOV()
                         local d = math.sqrt(dx * dx + dy * dy)
                         if d < bestDist then
                             bestDist = d
-                            best = part
+                            best = { player = plr, part = part }
                         end
                     end
                 end
@@ -1952,10 +2013,25 @@ end
 
 local function runAimbot()
     if not aimbotEnabled or not aiming then return end
-    local target = getClosestPlayerInFOV()
-    if not target then return end
+    local targetData = getClosestPlayerInFOV()
+    if not targetData then return end
+
+    local target = targetData.part
+    local aimPos = target.Position
+
+    if aimbotPrediction then
+        local char = targetData.player.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local velocity = hrp.Velocity
+            if velocity.Magnitude > 2 then
+                aimPos = aimPos + velocity * aimbotPredictionFactor
+            end
+        end
+    end
+
     local cam = workspace.CurrentCamera
-    local desired = CFrame.new(cam.CFrame.Position, target.Position)
+    local desired = CFrame.new(cam.CFrame.Position, aimPos)
     local alpha = math.clamp(aimbotSmoothing, 0.01, 1)
     cam.CFrame = cam.CFrame:Lerp(desired, alpha)
 end
@@ -2041,7 +2117,7 @@ local function StopAntiFling()
 end
 
 -- ============================================================
--- FLING (SkidFling / EpixVel from YARHM)
+-- FLING
 -- ============================================================
 local flingActive = false
 local flingTargetPlayer = nil
@@ -2247,7 +2323,7 @@ local function FlingSheriff()
 end
 
 -- ============================================================
--- KNIFE AURA (slash)
+-- KNIFE AURA
 -- ============================================================
 local knifeAuraConnection = nil
 
@@ -2539,9 +2615,7 @@ local function StartTriggerbot()
             local targetPlayer = Players:GetPlayerFromCharacter(targetModel)
             if not targetPlayer or targetPlayer == LocalPlayer then task.wait() continue end
 
-            local hasKnife = targetModel:FindFirstChild("Knife")
-                or (targetPlayer.Backpack and targetPlayer.Backpack:FindFirstChild("Knife"))
-            if not hasKnife then task.wait() continue end
+            if not isMurderer(targetPlayer) then task.wait() continue end
 
             local targetHRP = targetModel:FindFirstChild("HumanoidRootPart")
             if not targetHRP then task.wait() continue end
@@ -2676,7 +2750,7 @@ local function fireSilentAim()
         if player ~= LocalPlayer and player.Character then
             local hum = player.Character:FindFirstChildOfClass("Humanoid")
             if hum and hum.Health > 0 then
-                if isHoldingKnife(player) then
+                if isMurderer(player) then
                     local part = getAimPart(player.Character)
                     if part then
                         local d = (part.Position - originCF.Position).Magnitude
@@ -2824,7 +2898,7 @@ local function StopAutoThrow()
 end
 
 -- ============================================================
--- KILL EVERYONE (as Murderer)
+-- KILL EVERYONE
 -- ============================================================
 local function KillEveryone()
     if not isHoldingKnife(LocalPlayer) then
@@ -3267,6 +3341,13 @@ end)
 CombatPanel.CreateDropdown("AIM FOV", 150,
     {50, 75, 100, 125, 150, 200, 250, 350}, function(v)
     aimbotFOV = tonumber(v) or aimbotFOV
+end)
+CombatPanel.CreateToggle("Aim Prediction", false, function(s)
+    aimbotPrediction = s
+end)
+CombatPanel.CreateDropdown("PREDICTION FACTOR", 0.135,
+    {0.05, 0.08, 0.1, 0.12, 0.135, 0.15, 0.18, 0.2}, function(v)
+    aimbotPredictionFactor = tonumber(v) or aimbotPredictionFactor
 end)
 
 -- ============================================================
