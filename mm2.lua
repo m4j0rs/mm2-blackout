@@ -79,6 +79,57 @@ local RoleColors = {
 getgenv().BlackoutDiedThisRound = getgenv().BlackoutDiedThisRound or {}
 
 -- ============================================================
+-- FRIEND SYSTEM
+-- ============================================================
+local friendCheckEnabled = false      -- OFF by default
+local FriendIds = {}                  -- [userId] = true
+
+local function RefreshFriendList()
+    if not friendCheckEnabled then return end
+    -- Primary: Roblox's online friends list (only covers friends currently in-game)
+    pcall(function()
+        local success, pages = pcall(function()
+            return Players:GetFriendsAsync(LocalPlayer.UserId)
+        end)
+        if success and pages then
+            while true do
+                for _, item in ipairs(pages:GetCurrentPage()) do
+                    if item.Id then FriendIds[item.Id] = true end
+                end
+                if pages.IsFinished then break end
+                pages:AdvanceToNextPageAsync()
+            end
+        end
+    end)
+    -- Fallback: check everyone in server directly via IsFriendsWith
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local ok, res = pcall(function()
+                return LocalPlayer:IsFriendsWith(plr.UserId)
+            end)
+            if ok and res then
+                FriendIds[plr.UserId] = true
+            end
+        end
+    end
+end
+
+local function isFriend(plr)
+    if not friendCheckEnabled then return false end
+    if not plr or plr == LocalPlayer then return false end
+    if FriendIds[plr.UserId] then return true end
+    -- Live fallback check in case list is stale
+    local ok, res = pcall(function()
+        return LocalPlayer:IsFriendsWith(plr.UserId)
+    end)
+    if ok and res then
+        FriendIds[plr.UserId] = true
+        return true
+    end
+    return false
+end
+
+-- ============================================================
 -- ROLE DATA LOOKUP
 -- ============================================================
 local function GetRoleFromData(plr)
@@ -144,7 +195,6 @@ local function isHoldingGun(plr)
     return false
 end
 
--- FIXED: only counts as murderer if alive + actually in the round (has a live HumanoidRootPart)
 local function isAliveInRound(plr)
     if not plr then return false end
     if plr == LocalPlayer then return true end
@@ -173,7 +223,7 @@ local function findNearestPlayer()
     if not lpHRP then return nil end
     local nearest, shortest = nil, math.huge
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= lp and plr.Character then
+        if plr ~= lp and plr.Character and not isFriend(plr) then
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
             if hum and hum.Health > 0 and isAliveInRound(plr) then
                 local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
@@ -192,7 +242,7 @@ end
 
 local function findMurderer()
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and isAliveInRound(plr) then
+        if plr ~= LocalPlayer and isAliveInRound(plr) and not isFriend(plr) then
             local role = GetRoleFromData(plr)
             if role == "Murderer" then
                 return plr
@@ -200,7 +250,7 @@ local function findMurderer()
         end
     end
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and isAliveInRound(plr) and isHoldingKnife(plr) then
+        if plr ~= LocalPlayer and isAliveInRound(plr) and not isFriend(plr) and isHoldingKnife(plr) then
             return plr
         end
     end
@@ -209,7 +259,7 @@ end
 
 local function findSheriff()
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and isAliveInRound(plr) then
+        if plr ~= LocalPlayer and isAliveInRound(plr) and not isFriend(plr) then
             local role = GetRoleFromData(plr)
             if role == "Sheriff" then
                 return plr
@@ -217,7 +267,7 @@ local function findSheriff()
         end
     end
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and isAliveInRound(plr) and isHoldingGun(plr) then
+        if plr ~= LocalPlayer and isAliveInRound(plr) and not isFriend(plr) and isHoldingGun(plr) then
             return plr
         end
     end
@@ -235,7 +285,7 @@ local tracerEnabled = false
 local tracerOrigin = "Bottom"
 local healthBarEnabled = false
 local nameESPEnabled = true
-local selfESPEnabled = false   -- CHANGED: off by default
+local selfESPEnabled = false
 local murderPointerEnabled = true
 
 local aimbotEnabled = false
@@ -245,7 +295,7 @@ local aimbotPart = "UpperTorso"
 local aimbotKey = "Right Click"
 local aimbotTarget = "Murderer"
 local aiming = false
-local aimbotPrediction = true  -- CHANGED: on by default
+local aimbotPrediction = true
 local aimbotPredictionFactor = 0.135
 
 local knifeAuraEnabled = false
@@ -266,6 +316,8 @@ local coinFarmWarmup = 0.25
 local silentAimToggleRef = nil
 local triggerbotToggleRef = nil
 local silentAimConnection = nil
+local silentAimKeyEnabled = false    -- NEW: E-key silent aim
+local SILENT_AIM_PREDICT = 0.135
 
 local antiFlingEnabled = false
 local antiFlingConnections = {}
@@ -1449,6 +1501,7 @@ end
 
 for _, plr in ipairs(Players:GetPlayers()) do WatchDeaths(plr) end
 Players.PlayerAdded:Connect(WatchDeaths)
+
 -- ============================================================
 -- OUTLINE ESP
 -- ============================================================
@@ -1536,11 +1589,11 @@ local function StopOutlineESP()
         getgenv().PlayerOutlineObjects = {}
     end
 end
-
 -- ============================================================
 -- BOX ESP
 -- ============================================================
 local boxESPObjects = {}
+local FRIEND_COLOR = Color3.fromRGB(255, 215, 0)
 
 local function createBoxESP(plr)
     if plr == LocalPlayer and not selfESPEnabled then return end
@@ -1632,7 +1685,7 @@ local function updateBoxESP()
                         local pad = 2
                         d.box.Size = Vector2.new((maxX - minX) + pad * 2, (maxY - minY) + pad * 2)
                         d.box.Position = Vector2.new(minX - pad, minY - pad)
-                        d.box.Color = GetRoleColor(plr)
+                        d.box.Color = isFriend(plr) and FRIEND_COLOR or GetRoleColor(plr)
                         d.box.Thickness = boxThickness
                         d.box.Visible = true
                     else
@@ -1837,7 +1890,7 @@ local function updateSkeletonESP()
                     d.bonesChar = char
                 end
                 local cam = workspace.CurrentCamera
-                local color = GetRoleColor(plr)
+                local color = isFriend(plr) and FRIEND_COLOR or GetRoleColor(plr)
                 for i, line in ipairs(d.lines) do
                     local bone = d.bones[i]
                     if bone then
@@ -1916,7 +1969,7 @@ local function updateTracerESP()
                     end
                     d.line.From = origin
                     d.line.To = Vector2.new(screenPos.X, screenPos.Y)
-                    d.line.Color = GetRoleColor(plr)
+                    d.line.Color = isFriend(plr) and FRIEND_COLOR or GetRoleColor(plr)
                     d.line.Visible = true
                 else
                     d.line.Visible = false
@@ -1976,8 +2029,9 @@ local function updateNameESP()
             if head then
                 d.gui.Adornee = head
                 d.gui.Enabled = true
-                d.label.Text = plr.DisplayName or plr.Name
-                d.label.TextColor3 = GetRoleColor(plr)
+                local friendTag = isFriend(plr) and " [FRIEND]" or ""
+                d.label.Text = (plr.DisplayName or plr.Name) .. friendTag
+                d.label.TextColor3 = isFriend(plr) and FRIEND_COLOR or GetRoleColor(plr)
             else
                 d.gui.Enabled = false
             end
@@ -1992,7 +2046,7 @@ Players.PlayerAdded:Connect(createNameESP)
 Players.PlayerRemoving:Connect(removeNameESP)
 
 -- ============================================================
--- AIMBOT (with prediction option)
+-- AIMBOT
 -- ============================================================
 local function getClosestPlayerInFOV()
     local cam = workspace.CurrentCamera
@@ -2000,7 +2054,7 @@ local function getClosestPlayerInFOV()
     local center = Vector2.new(viewport.X / 2, viewport.Y / 2)
     local best, bestDist = nil, aimbotFOV
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character then
+        if plr ~= LocalPlayer and plr.Character and not isFriend(plr) then
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
             if hum and hum.Health > 0 then
                 if aimbotTarget == "Murderer" then
@@ -2071,8 +2125,6 @@ local function isAimInput(input)
         return input.KeyCode == Enum.KeyCode.X
     elseif aimbotKey == "Z" then
         return input.KeyCode == Enum.KeyCode.Z
-    elseif aimbotKey == "E" then
-        return input.KeyCode == Enum.KeyCode.E
     end
     return false
 end
@@ -2168,9 +2220,12 @@ local function FlingPlayer(TargetPlayer)
         warn("[Fling] No target")
         return
     end
-    -- FIXED: require target be alive and actually in the current round
     if not isAliveInRound(TargetPlayer) then
         warn("[Fling] Target is dead or not in the round")
+        return
+    end
+    if isFriend(TargetPlayer) then
+        warn("[Fling] Target is a friend, aborted")
         return
     end
     if flingActive then StopFling(); task.wait(0.1) end
@@ -2327,7 +2382,7 @@ local function FlingByName(name)
     if not name or name == "" then warn("[Fling] Enter a username"); return end
     local lower = name:lower()
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and isAliveInRound(plr) then
+        if plr ~= LocalPlayer and isAliveInRound(plr) and not isFriend(plr) then
             if plr.Name:lower():find(lower, 1, true) or (plr.DisplayName or ""):lower():find(lower, 1, true) then
                 FlingPlayer(plr)
                 return
@@ -2346,6 +2401,7 @@ local function FlingSheriff()
     local t = findSheriff()
     if t then FlingPlayer(t) else warn("[Fling] No sheriff found") end
 end
+
 -- ============================================================
 -- KNIFE AURA
 -- ============================================================
@@ -2363,7 +2419,7 @@ local function startKnifeAura()
         if tool.Name ~= "Knife" then return end
 
         for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer and plr.Character and isAliveInRound(plr) then
+            if plr ~= LocalPlayer and plr.Character and isAliveInRound(plr) and not isFriend(plr) then
                 local targetHRP = plr.Character:FindFirstChild("HumanoidRootPart")
                 if targetHRP and (targetHRP.Position - hrp.Position).Magnitude <= knifeAuraRange then
                     pcall(function() tool:Activate() end)
@@ -2640,6 +2696,7 @@ local function StartTriggerbot()
             if not targetPlayer or targetPlayer == LocalPlayer then task.wait() continue end
 
             if not isAliveInRound(targetPlayer) then task.wait() continue end
+            if isFriend(targetPlayer) then task.wait() continue end
             if not isMurderer(targetPlayer) then task.wait() continue end
 
             local targetHRP = targetModel:FindFirstChild("HumanoidRootPart")
@@ -2673,11 +2730,8 @@ local function StopTriggerbot()
 end
 
 -- ============================================================
--- SILENT AIM
+-- SILENT AIM (E KEY SINGLE SHOT + PREDICTION)
 -- ============================================================
-getgenv().SilentAimActive = false
-silentAimConnection = nil
-
 local function isFirstPerson()
     local cam = workspace.CurrentCamera
     local char = LocalPlayer.Character
@@ -2698,6 +2752,7 @@ local function getGunForSilent()
         if bg then
             local hum = char:FindFirstChildOfClass("Humanoid")
             if hum then pcall(function() hum:EquipTool(bg) end) end
+            task.wait(0.05)
             return char:FindFirstChild("Gun") or char:FindFirstChild("Revolver")
         end
     end
@@ -2759,39 +2814,52 @@ local function buildSilentRayFilter()
     return filter
 end
 
-local function fireSilentAim()
-    if not getgenv().SilentAimActive then return end
+-- One-shot silent aim on the murderer (or closest murderer if multiple)
+local function fireSilentAimAtMurderer()
+    if not silentAimKeyEnabled then return end
     local char = LocalPlayer.Character
     if not char then return end
 
     local gun = getGunForSilent()
-    if not gun then return end
+    if not gun then
+        ShowNotification("Silent Aim", "No gun equipped / in backpack")
+        return
+    end
 
     local originCF = getSilentOrigin(gun)
     if not originCF then return end
 
+    -- Find best murderer target (alive, in round, not friend)
     local bestTarget, bestPart, bestDist = nil, nil, math.huge
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character then
+        if player ~= LocalPlayer and player.Character and not isFriend(player) then
             local hum = player.Character:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health > 0 and isAliveInRound(player) then
-                if isMurderer(player) then
-                    local part = getAimPart(player.Character)
-                    if part then
-                        local d = (part.Position - originCF.Position).Magnitude
-                        if d < bestDist then
-                            bestDist = d
-                            bestTarget = player
-                            bestPart = part
-                        end
+            if hum and hum.Health > 0 and isAliveInRound(player) and isMurderer(player) then
+                local part = getAimPart(player.Character)
+                if part then
+                    local d = (part.Position - originCF.Position).Magnitude
+                    if d < bestDist then
+                        bestDist = d
+                        bestTarget = player
+                        bestPart = part
                     end
                 end
             end
         end
     end
-    if not bestTarget then return end
+    if not bestTarget then
+        return
+    end
 
+    -- Velocity prediction so it hits moving targets
     local aimPos = bestPart.Position
+    local hrp = bestTarget.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local vel = hrp.Velocity
+        if vel.Magnitude > 2 then
+            aimPos = aimPos + vel * SILENT_AIM_PREDICT
+        end
+    end
 
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -2801,38 +2869,28 @@ local function fireSilentAim()
     local dir = (aimPos - originCF.Position)
     if dir.Magnitude < 0.01 then return end
 
+    -- Validate that the predicted point is actually on the target
     local result = workspace:Raycast(originCF.Position, dir.Unit * 1000, rayParams)
-    if not result or not result.Instance:IsDescendantOf(bestTarget.Character) then
-        return
+    if not result then return end
+    if not result.Instance:IsDescendantOf(bestTarget.Character) then
+        -- Prediction overshot into a wall; try direct aim without prediction
+        local dirDirect = (bestPart.Position - originCF.Position)
+        local resultDirect = workspace:Raycast(originCF.Position, dirDirect.Unit * 1000, rayParams)
+        if not resultDirect or not resultDirect.Instance:IsDescendantOf(bestTarget.Character) then
+            return
+        end
+        aimPos = bestPart.Position
     end
 
     local shootRemote = gun:FindFirstChild("Shoot") or gun:FindFirstChild("Fire")
     if not shootRemote then return end
 
-    shootRemote:FireServer(
-        CFrame.new(originCF.Position, aimPos),
-        CFrame.new(aimPos)
-    )
-end
-
-local function StartSilentAimLoop()
-    getgenv().SilentAimActive = true
-    if silentAimConnection then silentAimConnection:Disconnect() end
-    silentAimConnection = RunService.RenderStepped:Connect(function()
-        if not getgenv().SilentAimActive then return end
-        local rate = isFirstPerson() and 0.06 or 0.1
-        if tick() - (getgenv()._lastSilentShot or 0) < rate then return end
-        getgenv()._lastSilentShot = tick()
-        pcall(fireSilentAim)
+    pcall(function()
+        shootRemote:FireServer(
+            CFrame.new(originCF.Position, aimPos),
+            CFrame.new(aimPos)
+        )
     end)
-end
-
-local function StopSilentAimLoop()
-    getgenv().SilentAimActive = false
-    if silentAimConnection then
-        silentAimConnection:Disconnect()
-        silentAimConnection = nil
-    end
 end
 
 -- ============================================================
@@ -2875,6 +2933,7 @@ local function doKnifeThrow()
     local target = resolveAutoThrowTarget()
     if not target or not target.Character then return end
     if not isAliveInRound(target) then return end
+    if isFriend(target) then return end
     local hum = target.Character:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then return end
     local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
@@ -2948,7 +3007,7 @@ local function KillEveryone()
     if not lpHRP then return end
 
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character and isAliveInRound(player) then
+        if player ~= LocalPlayer and player.Character and isAliveInRound(player) and not isFriend(player) then
             local thrp = player.Character:FindFirstChild("HumanoidRootPart")
             if thrp then
                 thrp.Anchored = true
@@ -3040,7 +3099,7 @@ local function TpToRandomPlayer()
     if not hrp then return end
     local candidates = {}
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character and isAliveInRound(plr) then
+        if plr ~= LocalPlayer and plr.Character and isAliveInRound(plr) and not isFriend(plr) then
             local targetHRP = plr.Character:FindFirstChild("HumanoidRootPart")
             if targetHRP then table.insert(candidates, targetHRP) end
         end
@@ -3167,7 +3226,7 @@ end)
 MainPanel.CreateToggle("Name ESP", true, function(s)
     nameESPEnabled = s
 end)
-MainPanel.CreateToggle("Self ESP", false, function(s)   -- CHANGED: default off
+MainPanel.CreateToggle("Self ESP", false, function(s)
     selfESPEnabled = s
 end)
 MainPanel.CreateToggle("Gun Drop ESP", false, function(s)
@@ -3267,34 +3326,6 @@ CombatPanel.CreateToggle("Auto Grab Gun", false, function(s)
     if s then StartAutoGrab() else StopAutoGrab() end
 end)
 
-triggerbotToggleRef = CombatPanel.CreateToggle("Triggerbot", false, function(s)
-    if s then
-        if getgenv().SilentAimActive then
-            if silentAimToggleRef then
-                silentAimToggleRef.SetStateSilent(false)
-            end
-            StopSilentAimLoop()
-        end
-        StartTriggerbot()
-    else
-        StopTriggerbot()
-    end
-end)
-
-silentAimToggleRef = CombatPanel.CreateToggle("Silent Aim", false, function(s)
-    if s then
-        if getgenv().TriggerbotActive then
-            if triggerbotToggleRef then
-                triggerbotToggleRef.SetStateSilent(false)
-            end
-            StopTriggerbot()
-        end
-        StartSilentAimLoop()
-    else
-        StopSilentAimLoop()
-    end
-end)
-
 CombatPanel.CreateToggle("Auto Throw Knife", false, function(s)
     autoThrowEnabled = s
     if s then StartAutoThrow() else StopAutoThrow() end
@@ -3306,6 +3337,36 @@ end)
 CombatPanel.CreateDropdown("THROW RATE", 0.1,
     {0.05, 0.08, 0.1, 0.15, 0.2, 0.3, 0.5}, function(v)
     autoThrowRate = tonumber(v) or autoThrowRate
+end)
+
+-- NEW: Friend Check toggle (right after Throw Rate)
+CombatPanel.CreateToggle("Friend Check", false, function(s)
+    friendCheckEnabled = s
+    if s then
+        FriendIds = {}
+        RefreshFriendList()
+        ShowNotification("Friend Check", "Friends will be ignored by all combat features")
+    end
+end)
+
+CombatPanel.CreateSection("silent aim (e key)")
+silentAimToggleRef = CombatPanel.CreateToggle("Silent Aim (E Key)", false, function(s)
+    silentAimKeyEnabled = s
+    if s then
+        ShowNotification("Silent Aim", "Press E to fire at the murderer (auto-equips gun)")
+    end
+end)
+CombatPanel.CreateDropdown("SHOT PREDICTION", 0.135,
+    {0.05, 0.08, 0.1, 0.12, 0.135, 0.15, 0.18, 0.2, 0.25}, function(v)
+    SILENT_AIM_PREDICT = tonumber(v) or SILENT_AIM_PREDICT
+end)
+
+triggerbotToggleRef = CombatPanel.CreateToggle("Triggerbot", false, function(s)
+    if s then
+        StartTriggerbot()
+    else
+        StopTriggerbot()
+    end
 end)
 
 CombatPanel.CreateSection("insta kill")
@@ -3348,7 +3409,7 @@ CombatPanel.CreateToggle("Aimbot", false, function(s)
     if not s then aiming = false end
 end)
 CombatPanel.CreateDropdown("AIM KEY", "Right Click",
-    {"Right Click", "Left Alt", "Left Shift", "Q", "F", "C", "V", "X", "Z", "E"}, function(v)
+    {"Right Click", "Left Alt", "Left Shift", "Q", "F", "C", "V", "X", "Z"}, function(v)
     aimbotKey = v
     aiming = false
 end)
@@ -3368,7 +3429,7 @@ CombatPanel.CreateDropdown("AIM FOV", 150,
     {50, 75, 100, 125, 150, 200, 250, 350}, function(v)
     aimbotFOV = tonumber(v) or aimbotFOV
 end)
-CombatPanel.CreateToggle("Aim Prediction", true, function(s)   -- CHANGED: default on
+CombatPanel.CreateToggle("Aim Prediction", true, function(s)
     aimbotPrediction = s
 end)
 CombatPanel.CreateDropdown("PREDICTION FACTOR", 0.135,
@@ -3452,6 +3513,18 @@ getgenv().OutlineESPActive = true
 StartOutlineESP()
 
 -- ============================================================
+-- FRIEND LIST REFRESH LOOP (only if enabled)
+-- ============================================================
+task.spawn(function()
+    while true do
+        task.wait(30)
+        if friendCheckEnabled then
+            RefreshFriendList()
+        end
+    end
+end)
+
+-- ============================================================
 -- ESP RENDER LOOP
 -- ============================================================
 RunService.RenderStepped:Connect(function()
@@ -3471,6 +3544,11 @@ UserInputService.InputBegan:Connect(function(input, gpe)
     if gpe then return end
     if input.KeyCode == Enum.KeyCode.RightShift then
         ScreenGui.Enabled = not ScreenGui.Enabled
+    elseif input.KeyCode == Enum.KeyCode.E then
+        -- E = silent aim shot at murderer
+        if silentAimKeyEnabled then
+            task.spawn(fireSilentAimAtMurderer)
+        end
     elseif isAimInput(input) and aimbotEnabled then
         aiming = true
     end
@@ -3482,4 +3560,4 @@ UserInputService.InputEnded:Connect(function(input)
     end
 end)
 
-print("[Blackout] Loaded. RightShift = toggle all | Aim Key = configurable")
+print("[Blackout] Loaded. RightShift = toggle GUI | E = silent aim shot | Friend Check in Combat panel")
